@@ -1,8 +1,10 @@
 package uk.me.nicholaswilson.jsld;
 
+import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URL;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -58,28 +60,28 @@ public class Linker {
     description = "A JavaScript file containing symbols to link to the Wasm module",
     paramLabel = "SYMBOL_FILE"
   )
-  private List<Path> symbolFiles;
+  private List<Path> symbolFiles = new ArrayList<>();
 
   @Option(
     names = { "-e", "--exports" },
     description = "A JavaScript file containing methods to export in the JavaScript module",
     paramLabel = "EXPORT_FILE"
   )
-  private List<Path> exportFiles;
+  private List<Path> exportFiles = new ArrayList<>();
 
   @Option(
     names = { "-i", "--import" },
     description = "The allowed imports (free variables) for the module",
     paramLabel = "[BINDING=]NAME"
   )
-  private List<String> imports;
+  private List<String> imports = new ArrayList<>();
 
   @Parameters(
     index = "0",
     description = "The Wasm module to link against",
     paramLabel = "WASM_MODULE"
   )
-  private List<Path> wasmFile;
+  private List<Path> wasmFile = new ArrayList<>();
 
 
   /** The entrypoint for the linker */
@@ -152,7 +154,14 @@ public class Linker {
   /** Performs import file generation using the configured options */
   public void generateImports() {
     loadSymbols();
-    // XXX write out all defined symbols, one per line :)
+
+    try (BufferedWriter writer = Files.newBufferedWriter(outputFile, Charsets.UTF_8)) {
+      for (String symbolName : SymbolTable.INSTANCE.symbolSet())
+        writer.append(symbolName).append('\n');
+    } catch (IOException e) {
+      throw new LdException("Unable to write to " + outputFile + ": " +
+        e.getMessage(), e);
+    }
   }
 
 

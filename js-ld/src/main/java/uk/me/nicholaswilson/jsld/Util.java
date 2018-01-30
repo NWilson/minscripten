@@ -13,7 +13,8 @@ public class Util {
       byte[] encoded = Files.readAllBytes(path);
       return new String(encoded, Charsets.UTF_8);
     } catch (IOException e) {
-      throw new LdException("Error reading file " + path + ": " + e.getMessage(), e);
+      throw new LdException("Error reading file " + path.toAbsolutePath() +
+        ": " + e.getMessage(), e);
     }
   }
 

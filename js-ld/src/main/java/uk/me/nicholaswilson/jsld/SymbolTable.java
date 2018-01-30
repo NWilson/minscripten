@@ -1,11 +1,10 @@
 package uk.me.nicholaswilson.jsld;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 public class SymbolTable {
 
-  final Map<String, Definition> symbols = new HashMap<>();
+  final Map<String, Definition> symbols = new LinkedHashMap<>();
 
   public static final SymbolTable INSTANCE = new SymbolTable();
 
@@ -15,10 +14,14 @@ public class SymbolTable {
     Definition existingSymbol = symbols.get(symbolName);
     if (existingSymbol != null) {
       throw new LdException("Symbol " + symbolName + " from " +
-        symbol.getSource() + "already defined in " +
+        symbol.getSource() + " already defined in " +
         existingSymbol.getSource());
     }
     symbols.put(symbolName, symbol);
+  }
+
+  public Set<String> symbolSet() {
+    return Collections.unmodifiableSet(symbols.keySet());
   }
 
 
@@ -40,6 +43,7 @@ public class SymbolTable {
     }
   }
 
+  /*
   public static class WasmDefinition implements Definition {
     public final String symbolName;
     public final WasmFile wasmFile;
@@ -51,6 +55,7 @@ public class SymbolTable {
       symbolName = name;
     }
   }
+  */
 
   private SymbolTable() {}
 
