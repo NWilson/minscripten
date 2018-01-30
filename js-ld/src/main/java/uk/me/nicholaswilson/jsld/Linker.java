@@ -4,6 +4,7 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -53,21 +54,21 @@ public class Linker {
     description = "The output filename",
     paramLabel = "OUTPUT_FILE"
   )
-  private Path outputFile;
+  private Path outputFilePath;
 
   @Option(
     names = { "-s", "--symbols" },
     description = "A JavaScript file containing symbols to link to the Wasm module",
     paramLabel = "SYMBOL_FILE"
   )
-  private List<Path> symbolFiles = new ArrayList<>();
+  private List<Path> symbolsFilePaths = new ArrayList<>();
 
   @Option(
     names = { "-e", "--exports" },
     description = "A JavaScript file containing methods to export in the JavaScript module",
     paramLabel = "EXPORT_FILE"
   )
-  private List<Path> exportFiles = new ArrayList<>();
+  private List<Path> exportsFilePaths = new ArrayList<>();
 
   @Option(
     names = { "-i", "--import" },
@@ -81,95 +82,143 @@ public class Linker {
     description = "The Wasm module to link against",
     paramLabel = "WASM_MODULE"
   )
-  private List<Path> wasmFile = new ArrayList<>();
+  private List<Path> wasmFilePath = new ArrayList<>();
 
 
   /** The entrypoint for the linker */
   public static void main(String[] args) {
-    CommandLine cmd = new CommandLine(new Linker());
+    Linker l = new Linker();
+    CommandLine cmd = new CommandLine(l);
     cmd.setOverwrittenOptionsAllowed(true);
-    cmd.parseWithHandlers(
-      (List<CommandLine> parsedCommands, PrintStream out, CommandLine.Help.Ansi ansi) -> {
-        if (CommandLine.printHelpIfRequested(parsedCommands, out, ansi))
-          return Collections.emptyList();
-        Linker l = parsedCommands.get(0).getCommand();
-        switch (l.action) {
-        case LINK:
-          if (l.wasmFile.isEmpty())
-            throw new CommandLine.ParameterException(
-              cmd,
-              "WASM_MODULE not specified for link"
-            );
-          l.link();
-          break;
-        case GENERATE_IMPORTS:
-          if (!l.wasmFile.isEmpty())
-            throw new CommandLine.ParameterException(
-              cmd,
-              "WASM_MODULE specified for pre-link"
-            );
-          if (!l.exportFiles.isEmpty())
-            throw new CommandLine.ParameterException(
-              cmd,
-              "Exports specified for pre-link"
-            );
-          if (!l.imports.isEmpty())
-            throw new CommandLine.ParameterException(
-              cmd,
-              "Imports specified for pre-link"
-            );
-          l.generateImports();
-          break;
-        }
-        return Collections.emptyList();
-      },
-      System.err,
-      CommandLine.Help.Ansi.AUTO,
-      new CommandLine.DefaultExceptionHandler(),
-      args
-    );
+    try {
+      List<Object> results = cmd.parseWithHandlers(
+        l.new ArgumentHandler(),
+        System.err,
+        CommandLine.Help.Ansi.AUTO,
+        new CommandLine.DefaultExceptionHandler(),
+        args
+      );
+      if (results.size() == 0)
+        System.exit(1);
+    } catch (LdException e) {
+      System.err.println(e.toString());
+      System.exit(1);
+    }
   }
 
-
-  /** Performs linking using the configured options */
-  public void link() {
-    // 1. Load all symbol files
-    // 2. Load the Wasm module, and grab its imports/exports
-    //    -> Check that we have a symbol for every import
-    //    -> Check that symbols don't conflict (across JS, Wasm imports, and Wasm exports)
-
-    // 3. Load all export files
-
-    // 4. Build output
-    //    -> Create a module, for each symbols files which have any used symbols
-    //    -> This module shall only export the symbols used
-    //    -> Instantiate the Wasm loader, pulling out imports from the symbols
-    //       and putting exports in there
-    //    -> Run shift-reduce over the whole thing to detect imports, and check
-    //       they're declared, and mark imports used
-    //    -> Write out the output!
-
-  }
 
   /** Performs import file generation using the configured options */
-  public void generateImports() {
+  private void generateImports() {
     loadSymbols();
 
-    try (BufferedWriter writer = Files.newBufferedWriter(outputFile, Charsets.UTF_8)) {
+    try (
+      BufferedWriter writer =
+        Files.newBufferedWriter(outputFilePath, StandardCharsets.UTF_8)
+    ) {
       for (String symbolName : SymbolTable.INSTANCE.symbolSet())
         writer.append(symbolName).append('\n');
     } catch (IOException e) {
-      throw new LdException("Unable to write to " + outputFile + ": " +
-        e.getMessage(), e);
+      throw new LdException(
+        "Unable to write to " + outputFilePath + ": " + e,
+        e
+      );
+    }
+  }
+
+  /** Performs linking using the configured options */
+  private void link() {
+    List<SymbolsFile> symbolsFiles = loadSymbols();
+    assert(wasmFilePath.size() == 1);
+    WasmFile wasmFile = new WasmFile(wasmFilePath.get(0));
+    String moduleName = outputFilePath.getFileName().toString()
+      .replaceFirst("\\.[a-z]+$", "");
+
+    // TODO
+    //List<ExportsFile> exportsFiles = loadExports();
+
+    SymbolTable.INSTANCE.reportUndefined();
+
+    String moduleStr =
+      new ModuleGenerator(symbolsFiles, wasmFile, moduleName).generate();
+
+    // TODO extra
+    // * Add in the exports to the module
+    // * Run shift-reduce over the whole thing to detect imports, and check
+    //   they're declared, and mark imports used
+
+    try (
+      BufferedWriter writer =
+        Files.newBufferedWriter(outputFilePath, StandardCharsets.UTF_8)
+    ) {
+      writer.write(moduleStr);
+    } catch (IOException e) {
+      throw new LdException(
+        "Unable to write to " + outputFilePath + ": " + e,
+        e
+      );
     }
   }
 
 
   private List<SymbolsFile> loadSymbols() {
     List<SymbolsFile> files = new ArrayList<>();
-    for (Path fileName : symbolFiles)
-      files.add(new SymbolsFile(fileName));
+    for (Path path : symbolsFilePaths)
+      files.add(new SymbolsFile(path));
     return files;
+  }
+
+
+  private class ArgumentHandler implements CommandLine.IParseResultHandler {
+
+    public List<Object> handleParseResult(
+      List<CommandLine> parsedCommands,
+      PrintStream out,
+      CommandLine.Help.Ansi ansi
+    ) throws CommandLine.ExecutionException {
+      if (CommandLine.printHelpIfRequested(parsedCommands, out, ansi))
+        return Collections.singletonList(null);
+
+      assert (parsedCommands.size() == 1);
+      CommandLine cmd = parsedCommands.get(0);
+      Linker l = Linker.this;
+
+      switch (l.action) {
+      case GENERATE_IMPORTS:
+        if (!l.wasmFilePath.isEmpty()) {
+          throw new CommandLine.ParameterException(
+            cmd,
+            "WASM_MODULE specified for pre-link"
+          );
+        }
+        if (!l.exportsFilePaths.isEmpty()) {
+          throw new CommandLine.ParameterException(
+            cmd,
+            "Exports specified for pre-link"
+          );
+        }
+        if (!l.imports.isEmpty()) {
+          throw new CommandLine.ParameterException(
+            cmd,
+            "Imports specified for pre-link"
+          );
+        }
+        l.generateImports();
+        break;
+
+      case LINK:
+        if (l.wasmFilePath.isEmpty()) {
+          throw new CommandLine.ParameterException(
+            cmd,
+            "WASM_MODULE not specified for link"
+          );
+        }
+        l.link();
+        break;
+      }
+
+      return Collections.singletonList(null);
+    }
+
   }
 
 
@@ -204,4 +253,5 @@ public class Linker {
       return attributes.get(new Attributes.Name(key));
     }
   }
+
 }
