@@ -30,8 +30,10 @@ public class WasmFile {
 
     // TODO load file from disk
     // TODO parse imports + exports
-    imports.add("testFunction"); // XXX
-    exports.add("testExport"); // XXX
+    imports.add("js_get_int"); // XXX
+    exports.add("wasm_add_one"); // XXX
+    exports.add("wasm_get_const"); // XXX
+    exports.add("wasm_unused_symbol"); // XXX
 
     // TODO check one memory import, no table imports
     // TODO ignore table exports, memory exports
@@ -52,16 +54,18 @@ public class WasmFile {
 
   public void appendExports(
     List<Statement> statements,
-    String symbolsName,
     String exportsName
   ) {
+    SymbolTable symbolTable = SymbolTable.INSTANCE;
     for (String e : exports) {
+      if (symbolTable.getSymbol(e).isUnused())
+        continue;
       // __symbols['<EXPORTED_NAME>'] = exports['<EXPORTED_NAME>']
       statements.add(new ExpressionStatement(
         new AssignmentExpression(
           new ComputedMemberExpression(
             new LiteralStringExpression(e),
-            new IdentifierExpression(symbolsName)
+            new IdentifierExpression(ModuleGenerator.SYMBOLS_VAR)
           ),
           new ComputedMemberExpression(
             new LiteralStringExpression(e),

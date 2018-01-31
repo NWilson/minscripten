@@ -14,6 +14,9 @@ import com.shapesecurity.shift.validator.Validator;
 
 public class ModuleUtil {
 
+  private static final String SYMBOLS_MODULE = "__symbols";
+
+
   /**
    * Validates that the given Module is correct.
    */
@@ -32,88 +35,157 @@ public class ModuleUtil {
   }
 
   /**
-   * Traverses the given Module, and pulls out its exports into a list of
-   * ExportSpecifiers, and also writes out a new list of nodes which make up the
-   * Module after the exports are removed.
+   * Traverses the given Module, and pulls out its imports/exports into a
+   * list of ImportSpecifiers/ExportSpecifiers, and also writes out a new list
+   * of nodes which make up the Module after the imports/exports are removed.
    * @param module     The input Module
    * @param moduleOut  The output of the Module's contents stripped of exports
+   * @param importsOut The output of the Module's imports (or null to disallow)
    * @param exportsOut The output of the Module's exports
    */
-  public static void extractExports(
+  public static void extractImportsExports(
     Module module,
     String moduleFileName,
     List<Statement> moduleOut,
+    List<ImportSpecifier> importsOut,
     List<ExportSpecifier> exportsOut
   ) {
     for (ImportDeclarationExportDeclarationStatement s : module.items) {
       if (s instanceof ImportDeclaration) {
-        throw new LdException(
-          "Module cannot contain 'import': " + moduleFileName
-        );
-      }
-
-      if (!(s instanceof ExportDeclaration)) {
-        moduleOut.add((Statement)s);
-        continue;
-      }
-
-      if (s instanceof ExportDefault) {
-        throw new LdException(
-          "Module cannot contain 'export default': " + moduleFileName
-        );
-      }
-      if (s instanceof ExportAllFrom) {
-        throw new LdException(
-          "Module cannot contain 'export *': " + moduleFileName
-        );
-      }
-
-      if (s instanceof ExportFrom) {
-        ExportFrom e = (ExportFrom)s;
-        if (e.moduleSpecifier.isJust()) {
+        if (importsOut == null) {
           throw new LdException(
-            "Module cannot contain 'export from': " + moduleFileName
+            "Module cannot contain 'import': " + moduleFileName
           );
         }
-        for (ExportSpecifier es : e.namedExports) {
-          exportsOut.add(es);
-        }
+        extractImport((ImportDeclaration)s, moduleFileName, importsOut);
         continue;
       }
 
-      assert (s instanceof Export);
-      Export e = (Export)s;
+      if (s instanceof ExportDeclaration) {
+        if (exportsOut == null) {
+          throw new LdException(
+            "Module cannot contain 'export': " + moduleFileName
+          );
+        }
+        extractExport(
+          (ExportDeclaration)s,
+          moduleFileName,
+          moduleOut,
+          exportsOut
+        );
+        continue;
+      }
 
-      List<String> names;
-      if (e.declaration instanceof ClassDeclaration) {
-        ClassDeclaration cd = (ClassDeclaration) e.declaration;
-        moduleOut.add(cd);
-        names = Collections.singletonList(cd.name.name);
-      } else if (e.declaration instanceof FunctionDeclaration) {
-        FunctionDeclaration fd = (FunctionDeclaration)e.declaration;
-        moduleOut.add(fd);
-        names = Collections.singletonList(fd.name.name);
-      } else {
-        assert (e.declaration instanceof VariableDeclaration);
-        VariableDeclaration vd = (VariableDeclaration)e.declaration;
-        moduleOut.add(new VariableDeclarationStatement(vd));
-        names = new ArrayList<>();
-        for (VariableDeclarator v : vd.declarators) {
-          if (v.binding instanceof ObjectBinding) {
-            // TODO
-            throw new LdException("Unsupported object binding - FIXME");
-          } else if (v.binding instanceof ArrayBinding) {
-            // TODO
-            throw new LdException("Unsupported array binding - FIXME");
-          } else {
-            assert (v.binding instanceof BindingIdentifier);
-            names.add(((BindingIdentifier)v.binding).name);
-          }
+      moduleOut.add((Statement)s);
+    }
+  }
+
+  private static void extractImport(
+    ImportDeclaration id,
+    String moduleFileName,
+    List<ImportSpecifier> importsOut
+  ) {
+    if (id instanceof ImportNamespace) {
+      // Unsupported, because it doesn't play well with our linking model
+      throw new LdException(
+        "Module cannot contain 'import *': " + moduleFileName
+      );
+    }
+
+    assert(id instanceof Import);
+    Import i = (Import)id;
+
+    if (i.defaultBinding.isJust()) {
+      // Unsupported, because there is no "default" symbol to import!
+      throw new LdException(
+        "Module cannot contain 'import <default>': " + moduleFileName
+      );
+    }
+
+    if (i.namedImports.isEmpty()) {
+      // Unsupported, because it doesn't play well with our linking model
+      throw new LdException(
+        "Module cannot contain 'import <all>': " + moduleFileName
+      );
+    }
+
+    if (!i.moduleSpecifier.equals(SYMBOLS_MODULE)) {
+      throw new LdException(
+        "Module can only import symbols from " + SYMBOLS_MODULE + ": " +
+          moduleFileName
+      );
+    }
+
+    for (ImportSpecifier is : i.namedImports)
+      importsOut.add(is);
+  }
+
+  private static void extractExport(
+    ExportDeclaration ed,
+    String moduleFileName,
+    List<Statement> moduleOut,
+    List<ExportSpecifier> exportsOut
+  ) {
+    if (ed instanceof ExportDefault) {
+      // Unsupported, because there is no default symbol!
+      throw new LdException(
+        "Module cannot contain 'export default': " + moduleFileName
+      );
+    }
+
+    if (ed instanceof ExportAllFrom) {
+      // Unsupported, because it doesn't play well with our linking model
+      throw new LdException(
+        "Module cannot contain 'export *': " + moduleFileName
+      );
+    }
+
+    if (ed instanceof ExportFrom) {
+      ExportFrom ef = (ExportFrom)ed;
+      if (ef.moduleSpecifier.isJust()) {
+        // Unsupported because what's the point of exporting symbols like this?
+        throw new LdException(
+          "Module cannot contain 'export from': " + moduleFileName
+        );
+      }
+      for (ExportSpecifier es : ef.namedExports) {
+        exportsOut.add(es);
+      }
+      return;
+    }
+
+    assert (ed instanceof Export);
+    Export e = (Export)ed;
+
+    List<String> names;
+    if (e.declaration instanceof ClassDeclaration) {
+      ClassDeclaration cd = (ClassDeclaration) e.declaration;
+      moduleOut.add(cd);
+      names = Collections.singletonList(cd.name.name);
+    } else if (e.declaration instanceof FunctionDeclaration) {
+      FunctionDeclaration fd = (FunctionDeclaration)e.declaration;
+      moduleOut.add(fd);
+      names = Collections.singletonList(fd.name.name);
+    } else {
+      assert (e.declaration instanceof VariableDeclaration);
+      VariableDeclaration vd = (VariableDeclaration)e.declaration;
+      moduleOut.add(new VariableDeclarationStatement(vd));
+      names = new ArrayList<>();
+      for (VariableDeclarator v : vd.declarators) {
+        if (v.binding instanceof ObjectBinding) {
+          // TODO just laziness, I have no need for it right now and it's fiddly
+          throw new LdException("Unsupported object binding - FIXME");
+        } else if (v.binding instanceof ArrayBinding) {
+          // TODO just laziness, I have no need for it right now and it's fiddly
+          throw new LdException("Unsupported array binding - FIXME");
+        } else {
+          assert (v.binding instanceof BindingIdentifier);
+          names.add(((BindingIdentifier)v.binding).name);
         }
       }
-      for (String name : names) {
-        exportsOut.add(new ExportSpecifier(Maybe.empty(), name));
-      }
+    }
+    for (String name : names) {
+      exportsOut.add(new ExportSpecifier(Maybe.empty(), name));
     }
   }
 
@@ -147,6 +219,57 @@ public class ModuleUtil {
         "Unable to parse fragment '" + fragment + "': " + e
       );
     }
+  }
+
+  public static Expression generateLateBinding(
+    BindingIdentifier rebindVar,
+    Expression bindingExpression
+  ) {
+    String argsVar = "args";
+    String lateBindingVar = "lateBinding";
+    // function(...args) { <BODY> }
+    return new FunctionExpression(
+      Maybe.empty(),
+      false,
+      new FormalParameters(
+        ImmutableList.empty(),
+        Maybe.of(new BindingIdentifier(argsVar))
+      ),
+      new FunctionBody(
+        ImmutableList.empty(),
+        ImmutableList.of(
+          // const lateBinding = (rebindVar = bindingExpression);
+          new VariableDeclarationStatement(
+            new VariableDeclaration(
+              VariableDeclarationKind.Const,
+              ImmutableList.of(
+                new VariableDeclarator(
+                  new BindingIdentifier(lateBindingVar),
+                  Maybe.of(
+                    new AssignmentExpression(rebindVar, bindingExpression)
+                  )
+                )
+              )
+            )
+          ),
+          // return lateBinding.call(this, ...args);
+          new ReturnStatement(
+            Maybe.of(
+              new CallExpression(
+                new StaticMemberExpression(
+                  "call",
+                  new IdentifierExpression(lateBindingVar)
+                ),
+                ImmutableList.of(
+                  new ThisExpression(),
+                  new SpreadElement(new IdentifierExpression(argsVar))
+                )
+              )
+            )
+          )
+        )
+      )
+    );
   }
 
 

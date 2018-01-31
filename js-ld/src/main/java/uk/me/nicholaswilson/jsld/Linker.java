@@ -13,6 +13,7 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
+import java.util.stream.Collectors;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -128,22 +129,22 @@ public class Linker {
   /** Performs linking using the configured options */
   private void link() {
     List<SymbolsFile> symbolsFiles = loadSymbols();
+    List<ExportsFile> exportsFiles = loadExports();
     assert(wasmFilePath.size() == 1);
     WasmFile wasmFile = new WasmFile(wasmFilePath.get(0));
     String moduleName = outputFilePath.getFileName().toString()
       .replaceFirst("\\.[a-z]+$", "");
 
-    // TODO
-    //List<ExportsFile> exportsFiles = loadExports();
-
     SymbolTable.INSTANCE.reportUndefined();
 
-    String moduleStr =
-      new ModuleGenerator(symbolsFiles, wasmFile, moduleName).generate();
+    String moduleStr = new ModuleGenerator(
+      symbolsFiles,
+      exportsFiles,
+      wasmFile,
+      moduleName
+    ).generate();
 
-    // TODO extra
-    // * Add in the exports to the module
-    // * Run shift-reduce over the whole thing to detect imports, and check
+    // TODO Run shift-reduce over the whole thing to detect imports, and check
     //   they're declared, and mark imports used
 
     try (
@@ -161,10 +162,15 @@ public class Linker {
 
 
   private List<SymbolsFile> loadSymbols() {
-    List<SymbolsFile> files = new ArrayList<>();
-    for (Path path : symbolsFilePaths)
-      files.add(new SymbolsFile(path));
-    return files;
+    return symbolsFilePaths.stream()
+      .map(SymbolsFile::new)
+      .collect(Collectors.toList());
+  }
+
+  private List<ExportsFile> loadExports() {
+    return exportsFilePaths.stream()
+      .map(ExportsFile::new)
+      .collect(Collectors.toList());
   }
 
 

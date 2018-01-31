@@ -80,6 +80,10 @@ public class SymbolTable {
       return used;
     }
 
+    public boolean isUnused() {
+      return !used;
+    }
+
     public void markUsed() {
       used = true;
     }

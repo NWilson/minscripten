@@ -18,22 +18,24 @@ public class ModuleGenerator {
   // popular third-party script called "symbols"...  Thus I'm trying to keep to
   // an absolute minimum any pollution of the namespace that modules are nested
   // inside, and use underscores for those symbols to make sure.
-  private static final String CURRENT_SCRIPT_VAR = "__currentScript";
-  private static final String FETCH_VAR = "__fetch";
-  private static final String EXPORTS_VAR = "__exports";
-  private static final String SYMBOLS_VAR = "__symbols";
+  public static final String CURRENT_SCRIPT_VAR = "__currentScript";
+  public static final String EXPORTS_VAR = "__exports";
+  public static final String SYMBOLS_VAR = "__symbols";
 
   private List<Statement> script = new ArrayList<>();
   private final List<SymbolsFile> symbolsFiles;
+  private final List<ExportsFile> exportsFiles;
   private final WasmFile wasmFile;
   private final String moduleName;
 
   public ModuleGenerator(
     List<SymbolsFile> symbolsFiles,
+    List<ExportsFile> exportsFiles,
     WasmFile wasmFile,
     String moduleName
   ) {
     this.symbolsFiles = symbolsFiles;
+    this.exportsFiles = exportsFiles;
     this.wasmFile = wasmFile;
     this.moduleName = moduleName;
   }
@@ -41,6 +43,7 @@ public class ModuleGenerator {
   public String generate() {
     generatePreamble();
     generateJsSymbols();
+    generateJsExports();
     generatePostamble();
     generateWrapper();
     return generateScript();
@@ -50,14 +53,20 @@ public class ModuleGenerator {
   private void generatePreamble() {
     ModuleUtil.appendFragment(
       script,
-      "var " + EXPORTS_VAR + " = {};\n" +
-        "var " + SYMBOLS_VAR + " = {};"
+      "const " + EXPORTS_VAR + " = {};\n" +
+        "const " + SYMBOLS_VAR + " = {};"
     );
   }
 
   private void generateJsSymbols() {
     for (SymbolsFile symbolsFile : symbolsFiles) {
-      symbolsFile.appendModule(script, SYMBOLS_VAR);
+      symbolsFile.appendModule(this, script);
+    }
+  }
+
+  private void generateJsExports() {
+    for (ExportsFile exportsFile : exportsFiles) {
+      exportsFile.appendModule(this, script);
     }
   }
 
@@ -85,7 +94,7 @@ public class ModuleGenerator {
     );
 
     CallExpression ce = new CallExpression(
-      new IdentifierExpression(FETCH_VAR),
+      new IdentifierExpression("fetch"),
       ImmutableList.of(wasmUrlExpression)
     );
 
@@ -118,9 +127,9 @@ public class ModuleGenerator {
     List<Statement> wasmInstanceStatements = new ArrayList<>();
     ModuleUtil.appendFragment(
       wasmInstanceStatements,
-      "var " + exportsVar + " = " + wasmInstanceVar + "['exports'];"
+      "const " + exportsVar + " = " + wasmInstanceVar + "['exports'];"
     );
-    wasmFile.appendExports(wasmInstanceStatements, SYMBOLS_VAR, exportsVar);
+    wasmFile.appendExports(wasmInstanceStatements, exportsVar);
     ModuleUtil.appendFragment(
       wasmInstanceStatements,
       "return Object.freeze(" + EXPORTS_VAR + ");"
@@ -147,7 +156,9 @@ public class ModuleGenerator {
   }
 
   private void generateWrapper() {
-    List<ImportSpecifier> imports = Collections.emptyList(); // XXX
+    // XXX should come from analysis of the free variables in the module
+    List<ImportSpecifier> imports = Collections.emptyList();
+
     String rootVar = "root";
     String factoryVar = "factory";
 
@@ -198,9 +209,9 @@ public class ModuleGenerator {
       ))
     );
 
-    // (function(__currentScript, __fetch, IMPORTS_AS) {
+    // (function(__currentScript, IMPORTS_AS) {
     //   <BODY>
-    // }).bind(document.currentScript, this.fetch)
+    // }).bind(document.currentScript)
     Expression factoryExpression = new CallExpression(
       new StaticMemberExpression(
         "bind",
@@ -210,14 +221,11 @@ public class ModuleGenerator {
           new FormalParameters(
             ImmutableList.cons(
               new BindingIdentifier(CURRENT_SCRIPT_VAR),
-              ImmutableList.cons(
-                new BindingIdentifier(FETCH_VAR),
-                ImmutableList.from(
-                  imports.stream()
-                    .map(i -> i.binding.name)
-                    .map(BindingIdentifier::new)
-                    .collect(Collectors.toList())
-                )
+              ImmutableList.from(
+                imports.stream()
+                  .map(i -> i.binding.name)
+                  .map(BindingIdentifier::new)
+                  .collect(Collectors.toList())
               )
             ),
             Maybe.empty()
@@ -228,14 +236,13 @@ public class ModuleGenerator {
           )
         )
       ),
-      ImmutableList.of(
-        new ComputedMemberExpression(
-          new LiteralStringExpression("currentScript"),
-          new IdentifierExpression("document")
-        ),
-        new ComputedMemberExpression(
-          new LiteralStringExpression("fetch"),
-          new ThisExpression()
+      ImmutableList.cons(
+        new LiteralNullExpression(),
+        ImmutableList.of(
+          new StaticMemberExpression(
+            "currentScript",
+            new IdentifierExpression("document")
+          )
         )
       )
     );
@@ -273,6 +280,64 @@ public class ModuleGenerator {
         ImmutableList.from(script)
       )
     );
+  }
+
+  public void appendImports(
+    List<Statement> statementsOut,
+    List<ImportSpecifier> imports
+  ) {
+    statementsOut.add(new VariableDeclarationStatement(
+      // let <NAME>, ...
+      new VariableDeclaration(
+        VariableDeclarationKind.Let,
+        ImmutableList.from(
+          imports.stream()
+            .map(is -> new VariableDeclarator(
+              new BindingIdentifier(is.binding.name),
+              Maybe.empty()
+            ))
+            .collect(Collectors.toList())
+        )
+      )
+    ));
+    for (ImportSpecifier is : imports) {
+      // <NAME> = function(...args) { late-bind '<IMPORTED_NAME>' to name }
+      statementsOut.add(new ExpressionStatement(
+        new AssignmentExpression(
+          new BindingIdentifier(is.binding.name),
+          ModuleUtil.generateLateBinding(
+            new BindingIdentifier(is.binding.name),
+            new ComputedMemberExpression(
+              new LiteralStringExpression(
+                is.name.orJust(is.binding.name)
+              ),
+              new IdentifierExpression(
+                ModuleGenerator.SYMBOLS_VAR
+              )
+            )
+          )
+        )
+      ));
+    }
+  }
+
+  public void appendExports(
+    List<Statement> statementsOut,
+    List<ExportSpecifier> exports,
+    IdentifierExpression exportIdentifier
+  ) {
+    for (ExportSpecifier es : exports) {
+      // __exports['<EXPORTED_NAME>'] = <NAME>
+      statementsOut.add(new ExpressionStatement(
+        new AssignmentExpression(
+          new ComputedMemberExpression(
+            new LiteralStringExpression(es.exportedName),
+            exportIdentifier
+          ),
+          new IdentifierExpression(es.name.orJust(es.exportedName))
+        )
+      ));
+    }
   }
 
 }
