@@ -58,6 +58,7 @@
                   </manifestEntries>
                 </transformer>
               </transformers>
+              <minimizeJar>true</minimizeJar>
             </configuration>
           </execution>
         </executions>
