@@ -10,7 +10,7 @@ import com.shapesecurity.functional.data.Maybe;
 import com.shapesecurity.shift.ast.*;
 import com.shapesecurity.shift.codegen.PrettyCodeGen;
 
-public class ModuleGenerator {
+class ModuleGenerator {
 
   // For good hygiene, I'm using double-underscore for anything that might
   // collide with names used by customer code.  For example, someone could
@@ -71,7 +71,7 @@ public class ModuleGenerator {
   }
 
   private void generatePostamble() {
-    // Construct an expression that will calculate the filepath for the WASM
+    // Construct an expression that will calculate the file path for the WASM
     // module, relative to the current script, and using the filename it has
     // on disk right now.
     //  -> new URL("<WASM_FILENAME>", __currentScript.src).toString()

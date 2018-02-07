@@ -20,6 +20,8 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
+// The suppressions are because picocli changes values via reflection
+@SuppressWarnings({"CanBeFinal", "MismatchedQueryAndUpdateOfCollection"})
 @Command(versionProvider = Linker.ManifestVersion.class, name = "js-ld")
 public class Linker {
 
@@ -86,7 +88,7 @@ public class Linker {
   private List<Path> wasmFilePath = new ArrayList<>();
 
 
-  /** The entrypoint for the linker */
+  /** The entry point for the linker */
   public static void main(String[] args) {
     Linker l = new Linker();
     CommandLine cmd = new CommandLine(l);
@@ -230,8 +232,8 @@ public class Linker {
 
   static class ManifestVersion implements CommandLine.IVersionProvider {
     public String[] getVersion() throws Exception {
-      Enumeration<URL> resources = Linker.class.getClassLoader().getResources(
-        "META-INF/MANIFEST.MF");
+      Enumeration<URL> resources =
+          Linker.class.getClassLoader().getResources("META-INF/MANIFEST.MF");
       while (resources.hasMoreElements()) {
         URL url = resources.nextElement();
         try {

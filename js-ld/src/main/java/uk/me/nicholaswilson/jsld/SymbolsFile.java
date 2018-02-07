@@ -11,7 +11,7 @@ import com.shapesecurity.shift.ast.*;
 import com.shapesecurity.shift.parser.JsError;
 import com.shapesecurity.shift.parser.Parser;
 
-public class SymbolsFile {
+class SymbolsFile {
 
   private final Path path;
   private final Module module;

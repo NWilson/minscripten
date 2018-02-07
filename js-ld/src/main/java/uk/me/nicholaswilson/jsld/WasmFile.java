@@ -16,39 +16,44 @@ import com.shapesecurity.shift.ast.ExpressionStatement;
 import com.shapesecurity.shift.ast.IdentifierExpression;
 import com.shapesecurity.shift.ast.LiteralStringExpression;
 import com.shapesecurity.shift.ast.Statement;
-import uk.me.nicholaswilson.jsld.wasm.WasmObjectType;
+import uk.me.nicholaswilson.jsld.wasm.*;
 
 import static uk.me.nicholaswilson.jsld.WasmUtil.*;
 
-public class WasmFile {
+class WasmFile {
 
   private static final String SYMBOLS_MODULE = "env";
 
   private static class ImportEntry {
     public final String module;
     public final String name;
-    public final WasmObjectType type;
+    public final WasmObjectDescriptor objectDescriptor;
 
-    private ImportEntry(String module, String name, WasmObjectType type) {
+    private ImportEntry(String module, String name, WasmObjectDescriptor objectDescriptor) {
       this.module = module;
       this.name = name;
-      this.type = type;
+      this.objectDescriptor = objectDescriptor;
     }
   }
 
   private static class ExportEntry {
     public final String name;
-    public final WasmObjectType type;
+    public final WasmObjectDescriptor objectDescriptor;
 
-    private ExportEntry(String name, WasmObjectType type) {
+    private ExportEntry(String name, WasmObjectDescriptor objectDescriptor) {
       this.name = name;
-      this.type = type;
+      this.objectDescriptor = objectDescriptor;
     }
   }
 
   private final Path path;
   private final List<ImportEntry> imports = new ArrayList<>();
   private final List<ExportEntry> exports = new ArrayList<>();
+  private final List<WasmFunctionSignature> signatures = new ArrayList<>(); // TYPE section
+  private final List<WasmFunctionSignature> functionSignatures = new ArrayList<>(); // FUNCTION sect
+  private final List<WasmGlobalSignature> globalSignatures = new ArrayList<>(); // GLOBAL section
+  private final List<WasmFunctionSignature> functionImports = new ArrayList<>(); // IMPORT section
+  private final List<WasmGlobalSignature> globalImports = new ArrayList<>(); // IMPORT section
 
   public Path getPath() {
     return path;
@@ -67,8 +72,18 @@ public class WasmFile {
       while (buffer.hasRemaining()) {
         byte sectionId = buffer.get();
         int sectionLen = getUleb32(buffer);
-        if (sectionId == IMPORT_SECTION_ID) {
+        if (sectionId == TYPE_SECTION_ID) {
+          readTypes((ByteBuffer)buffer.slice().limit(sectionLen));
+        } else if (sectionId == IMPORT_SECTION_ID) {
           readImports((ByteBuffer)buffer.slice().limit(sectionLen));
+        } else if (sectionId == FUNCTION_SECTION_ID) {
+          readFunctions((ByteBuffer)buffer.slice().limit(sectionLen));
+        } else if (sectionId == TABLE_SECTION_ID) {
+          readTables((ByteBuffer)buffer.slice().limit(sectionLen));
+        } else if (sectionId == MEMORY_SECTION_ID) {
+          readMemories((ByteBuffer)buffer.slice().limit(sectionLen));
+        } else if (sectionId == GLOBAL_SECTION_ID) {
+          readGlobals((ByteBuffer)buffer.slice().limit(sectionLen));
         } else if (sectionId == EXPORT_SECTION_ID) {
           readExports((ByteBuffer)buffer.slice().limit(sectionLen));
         }
@@ -88,12 +103,14 @@ public class WasmFile {
         continue;
       SymbolTable.Symbol symbol = SymbolTable.INSTANCE.addUndefined(ie.name);
       symbol.markUsed();
+      symbol.setDescriptor(ie.objectDescriptor);
     }
     for (ExportEntry ee : exports) {
-      SymbolTable.INSTANCE.addDefined(
-        ee.name,
-        new SymbolTable.WasmDefinition(this)
+      SymbolTable.Symbol symbol = SymbolTable.INSTANCE.addDefined(
+          ee.name,
+          new SymbolTable.WasmDefinition(this)
       );
+      symbol.setDescriptor(ee.objectDescriptor);
     }
   }
 
@@ -122,6 +139,13 @@ public class WasmFile {
   }
 
 
+  private void readTypes(ByteBuffer buffer) {
+    int numTypes = getUleb32(buffer);
+    while ((numTypes--) > 0) {
+      signatures.add(getFuncType(buffer));
+    }
+  }
+
   private void readImports(ByteBuffer buffer) {
     int numImports = getUleb32(buffer);
     while ((numImports--) > 0) {
@@ -129,25 +153,59 @@ public class WasmFile {
       String name = getString(buffer);
       WasmObjectType type = WasmObjectType.of(buffer.get());
       switch (type) {
-        case FUNCTION:
-          getTypeIdx(buffer); // ignore type
+        case FUNCTION: {
+          int typeIndex = getTypeIdx(buffer);
+          if (typeIndex >= signatures.size())
+            throw new LdException("Invalid Wasm file: bad fn import type");
+          WasmFunctionSignature signature = signatures.get(typeIndex);
+          imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Function(signature)));
+          functionImports.add(signature);
           break;
-        case TABLE:
-          getTableType(buffer); // ignore type
+        }
+        case TABLE: {
+          WasmTableSignature signature = getTableType(buffer);
+          imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Table(signature)));
           break;
-        case MEMORY:
-          getLimits(buffer);
-          // XXX current prototype of js-ld handles memory export but not import;
-          // the actual final thing should handle both, or in fact we should
-          // handle import but not export really, since you have to use an
-          // imported memory if you want syscalls during startup code to be
-          // vaguely useful,
-          throw new LdException("XXX handle memory import");
-        case GLOBAL:
-          getGlobalType(buffer); // ignore type
+        }
+        case MEMORY: {
+          WasmLimits limits = getLimits(buffer);
+          imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Memory(limits)));
           break;
+        }
+        case GLOBAL: {
+          WasmGlobalSignature signature = getGlobalType(buffer);
+          imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Global(signature)));
+          globalImports.add(signature);
+          break;
+        }
       }
-      imports.add(new ImportEntry(module, name, type));
+    }
+  }
+
+  private void readFunctions(ByteBuffer buffer) {
+    int numFunctions = getUleb32(buffer);
+    while ((numFunctions--) > 0) {
+      int typeIndex = getUleb32(buffer);
+      if (typeIndex >= signatures.size())
+        throw new LdException("Invalid Wasm file: bad type index");
+      functionSignatures.add(signatures.get(typeIndex));
+    }
+  }
+
+  private void readTables(ByteBuffer buffer) {
+    // TODO
+  }
+
+  private void readMemories(ByteBuffer buffer) {
+    // TODO
+  }
+
+  private void readGlobals(ByteBuffer buffer) {
+    int numGlobals = getUleb32(buffer);
+    while ((numGlobals--) > 0) {
+      WasmGlobalSignature signature = getGlobalType(buffer);
+      skipGlobalInit(buffer);
+      globalSignatures.add(signature);
     }
   }
 
@@ -156,9 +214,56 @@ public class WasmFile {
     while ((numExports--) > 0) {
       String name = getString(buffer);
       WasmObjectType type = WasmObjectType.of(buffer.get());
-      getUleb32(buffer); // skip the index
-      exports.add(new ExportEntry(name, type));
+      int index = getUleb32(buffer);
+      switch (type) {
+        case FUNCTION:
+          exports.add(
+            new ExportEntry(name, new WasmObjectDescriptor.Function(getFunctionSignature(index)))
+          );
+          break;
+        case TABLE:
+          exports.add(
+            new ExportEntry(name, new WasmObjectDescriptor.Table(getTableSignature(index)))
+          );
+          break;
+        case MEMORY:
+          exports.add(
+            new ExportEntry(name, new WasmObjectDescriptor.Memory(getMemoryLimits(index)))
+          );
+          break;
+        case GLOBAL:
+          exports.add(
+            new ExportEntry(name, new WasmObjectDescriptor.Global(getGlobalSignature(index)))
+          );
+          break;
+      }
     }
+  }
+
+  private WasmFunctionSignature getFunctionSignature(int index) {
+    int numFunctionImports = functionImports.size();
+    if (index < numFunctionImports)
+      return functionImports.get(index);
+    if (index < numFunctionImports + functionSignatures.size())
+      return functionSignatures.get(index - numFunctionImports);
+    throw new LdException("Invalid Wasm file: bad fn index");
+  }
+
+  private WasmTableSignature getTableSignature(int index) {
+    return null; // XXX
+  }
+
+  private WasmLimits getMemoryLimits(int index) {
+    return null; // XXX
+  }
+
+  private WasmGlobalSignature getGlobalSignature(int index) {
+    int numGlobalImports = globalImports.size();
+    if (index < numGlobalImports)
+      return globalImports.get(index);
+    if (index < numGlobalImports + globalSignatures.size())
+      return globalSignatures.get(index - numGlobalImports);
+    throw new LdException("Invalid Wasm file: bad global index");
   }
 
   private void validateNames() {

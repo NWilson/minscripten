@@ -12,7 +12,7 @@ import com.shapesecurity.shift.parser.Parser;
 import com.shapesecurity.shift.validator.ValidationError;
 import com.shapesecurity.shift.validator.Validator;
 
-public class ModuleUtil {
+class ModuleUtil {
 
   private static final String SYMBOLS_MODULE = "__symbols";
 
@@ -195,7 +195,7 @@ public class ModuleUtil {
         Parser.parseScript("function f() { " + fragment + " }").statements;
       assert(statements.maybeTail().isNothing());
       statements =
-        ((FunctionDeclaration)statements.maybeHead().orJust(null))
+        ((FunctionDeclaration)statements.maybeHead().fromJust())
           .body.statements;
       for (Statement st : statements) {
         script.add(st);
@@ -212,7 +212,7 @@ public class ModuleUtil {
       ImmutableList<Statement> statements =
         Parser.parseScript("(" + fragment + ")").statements;
       assert(statements.maybeTail().isNothing());
-      return ((ExpressionStatement)statements.maybeHead().orJust(null))
+      return ((ExpressionStatement)statements.maybeHead().fromJust())
         .expression;
     } catch (JsError e) {
       throw new LdException(

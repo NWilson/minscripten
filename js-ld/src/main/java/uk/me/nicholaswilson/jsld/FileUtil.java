@@ -6,7 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-public class FileUtil {
+class FileUtil {
 
   public static String pathToString(Path path) {
     try {

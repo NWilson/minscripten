@@ -2,6 +2,7 @@ package uk.me.nicholaswilson.jsld.wasm;
 
 import uk.me.nicholaswilson.jsld.LdException;
 
+@SuppressWarnings("SameParameterValue")
 public enum WasmElemType {
   anyfunc(0x70);
 

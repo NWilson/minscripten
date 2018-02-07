@@ -1,5 +1,8 @@
 package uk.me.nicholaswilson.jsld;
 
+import uk.me.nicholaswilson.jsld.wasm.WasmObjectDescriptor;
+import uk.me.nicholaswilson.jsld.wasm.WasmObjectType;
+
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -7,7 +10,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-public class SymbolTable {
+class SymbolTable {
 
   private final Map<String, Symbol> symbols = new LinkedHashMap<>();
 
@@ -15,11 +18,7 @@ public class SymbolTable {
 
 
   public Symbol addDefined(String symbolName, Definition definition) {
-    Symbol symbol = symbols.get(symbolName);
-    if (symbol == null) {
-      symbol = new Symbol(symbolName);
-      symbols.put(symbolName, symbol);
-    }
+    Symbol symbol = symbols.computeIfAbsent(symbolName, Symbol::new);
 
     if (symbol.isDefined()) {
       throw new LdException(
@@ -33,12 +32,7 @@ public class SymbolTable {
   }
 
   public Symbol addUndefined(String symbolName) {
-    Symbol symbol = symbols.get(symbolName);
-    if (symbol == null) {
-      symbol = new Symbol(symbolName);
-      symbols.put(symbolName, symbol);
-    }
-    return symbol;
+    return symbols.computeIfAbsent(symbolName, Symbol::new);
   }
 
   public Set<String> symbolSet() {
@@ -66,11 +60,12 @@ public class SymbolTable {
   }
 
 
-  public static class Symbol {
+  static class Symbol {
 
     private final String symbolName;
     private boolean used = false;
     private Definition definition = null;
+    private WasmObjectDescriptor objectDescriptor = null;
 
     public String getSymbolName() {
       return symbolName;
@@ -104,10 +99,18 @@ public class SymbolTable {
       return definition == null;
     }
 
+    public WasmObjectDescriptor getDescriptor() {
+      return objectDescriptor;
+    }
+
+    public void setDescriptor(WasmObjectDescriptor descriptor) {
+      assert(objectDescriptor == null && descriptor != null);
+      objectDescriptor = descriptor;
+    }
+
     protected Symbol(String symbolName) {
       this.symbolName = symbolName;
     }
-
   }
 
   public interface Definition {

@@ -2,6 +2,7 @@ package uk.me.nicholaswilson.jsld.wasm;
 
 import java.util.Optional;
 
+@SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 public class WasmLimits {
   public final int min;
   public final Optional<Integer> max;

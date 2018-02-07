@@ -1,10 +1,10 @@
 package uk.me.nicholaswilson.jsld.wasm;
 
-public class WasmGlobalType {
+public class WasmGlobalSignature {
   public final WasmValType valType;
   public final boolean mut;
 
-  public WasmGlobalType(WasmValType valType, boolean mut) {
+  public WasmGlobalSignature(WasmValType valType, boolean mut) {
     this.valType = valType;
     this.mut = mut;
   }

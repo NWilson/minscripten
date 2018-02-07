@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public class ExportsFile {
+class ExportsFile {
 
   private final Path path;
   private final Module module;
