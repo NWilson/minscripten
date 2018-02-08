@@ -62,23 +62,23 @@ public class Linker {
   @Option(
     names = { "-s", "--symbols" },
     description = "A JavaScript file containing symbols to link to the Wasm module",
-    paramLabel = "SYMBOL_FILE"
+    paramLabel = "SYMBOLS_FILE"
   )
   private List<Path> symbolsFilePaths = new ArrayList<>();
 
   @Option(
     names = { "-e", "--exports" },
     description = "A JavaScript file containing methods to export in the JavaScript module",
-    paramLabel = "EXPORT_FILE"
+    paramLabel = "EXPORTS_FILE"
   )
   private List<Path> exportsFilePaths = new ArrayList<>();
 
   @Option(
-    names = { "-i", "--import" },
-    description = "The allowed imports (free variables) for the module",
-    paramLabel = "[BINDING=]NAME"
+    names = { "-i", "--imports" },
+    description = "A JavaScript file containing variable declarations for allowed global variables",
+    paramLabel = "IMPORTS_FILE"
   )
-  private List<String> imports = new ArrayList<>();
+  private List<Path> importsFilePaths = new ArrayList<>();
 
   @Parameters(
     index = "0",
@@ -134,15 +134,18 @@ public class Linker {
     List<ExportsFile> exportsFiles = loadExports();
     assert(wasmFilePath.size() == 1);
     WasmFile wasmFile = new WasmFile(wasmFilePath.get(0));
-    String moduleName = outputFilePath.getFileName().toString()
-      .replaceFirst("\\.[a-z]+$", "");
+    List<SymbolTable.MemoryDefinition> memoryDefinitions =
+      SymbolTable.INSTANCE.provideUndefinedMemories();
 
     SymbolTable.INSTANCE.reportUndefined();
 
+    String moduleName = outputFilePath.getFileName().toString()
+      .replaceFirst("\\.[a-z]+$", "");
     String moduleStr = new ModuleGenerator(
       symbolsFiles,
       exportsFiles,
       wasmFile,
+      memoryDefinitions,
       moduleName
     ).generate();
 
@@ -186,7 +189,7 @@ public class Linker {
       if (CommandLine.printHelpIfRequested(parsedCommands, out, ansi))
         return Collections.singletonList(null);
 
-      assert (parsedCommands.size() == 1);
+      assert(parsedCommands.size() == 1);
       CommandLine cmd = parsedCommands.get(0);
       Linker l = Linker.this;
 
@@ -204,7 +207,7 @@ public class Linker {
             "Exports specified for pre-link"
           );
         }
-        if (!l.imports.isEmpty()) {
+        if (!l.importsFilePaths.isEmpty()) {
           throw new CommandLine.ParameterException(
             cmd,
             "Imports specified for pre-link"

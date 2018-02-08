@@ -9,6 +9,8 @@ import com.shapesecurity.functional.data.ImmutableList;
 import com.shapesecurity.functional.data.Maybe;
 import com.shapesecurity.shift.ast.*;
 import com.shapesecurity.shift.codegen.PrettyCodeGen;
+import uk.me.nicholaswilson.jsld.SymbolTable.MemoryDefinition;
+import uk.me.nicholaswilson.jsld.wasm.WasmLimits;
 
 class ModuleGenerator {
 
@@ -26,17 +28,20 @@ class ModuleGenerator {
   private final List<SymbolsFile> symbolsFiles;
   private final List<ExportsFile> exportsFiles;
   private final WasmFile wasmFile;
+  private final List<MemoryDefinition> memoryDefinitions;
   private final String moduleName;
 
   public ModuleGenerator(
     List<SymbolsFile> symbolsFiles,
     List<ExportsFile> exportsFiles,
     WasmFile wasmFile,
+    List<MemoryDefinition> memoryDefinitions,
     String moduleName
   ) {
     this.symbolsFiles = symbolsFiles;
     this.exportsFiles = exportsFiles;
     this.wasmFile = wasmFile;
+    this.memoryDefinitions = memoryDefinitions;
     this.moduleName = moduleName;
   }
 
@@ -114,12 +119,7 @@ class ModuleGenerator {
 
     ce = new CallExpression(
       new StaticMemberExpression("then", ce),
-      ImmutableList.of(ModuleUtil.parseFragmentExpression(
-        // XXX do something with it - create the memory!
-        "function(wasmModule) {\n" +
-          "  return WebAssembly.instantiate(wasmModule, { \"env\" : " +
-          SYMBOLS_VAR + "});\n" + "}"
-      ))
+      ImmutableList.of(generateInstantiation())
     );
 
     String wasmInstanceVar = "wasmInstance";
@@ -127,9 +127,20 @@ class ModuleGenerator {
     List<Statement> wasmInstanceStatements = new ArrayList<>();
     ModuleUtil.appendFragment(
       wasmInstanceStatements,
-      "const " + exportsVar + " = " + wasmInstanceVar + "['exports'];"
+      "const " + exportsVar + " = " + wasmInstanceVar + ".exports;"
     );
     wasmFile.appendExports(wasmInstanceStatements, exportsVar);
+    if (wasmFile.getNeedsExternalCallCtors()) {
+      wasmInstanceStatements.add(new ExpressionStatement(
+        new CallExpression(
+          new ComputedMemberExpression(
+            new LiteralStringExpression(WasmFile.CALL_CTORS_SYMBOL),
+            new IdentifierExpression(exportsVar)
+          ),
+          ImmutableList.empty()
+        )
+      ));
+    }
     ModuleUtil.appendFragment(
       wasmInstanceStatements,
       "return Object.freeze(" + EXPORTS_VAR + ");"
@@ -155,58 +166,134 @@ class ModuleGenerator {
     script.add(new ReturnStatement(Maybe.of(ce)));
   }
 
+  private Expression generateInstantiation() {
+    String moduleVar = "wasmModule";
+    List<Statement> instantiationStatements = new ArrayList<>();
+    for (MemoryDefinition memoryDefinition : memoryDefinitions) {
+      // __symbols['<MEMORY_NAME>'] = new WebAssembly.Memory(limit)
+      WasmLimits limits = memoryDefinition.signature.limits;
+      ImmutableList<ObjectProperty> limitProperties = ImmutableList.of(
+        new DataProperty(
+          new LiteralNumericExpression((double)limits.min),
+          new StaticPropertyName("initial")
+        )
+      );
+      if (limits.max.isPresent()) {
+        limitProperties = ImmutableList.cons(
+          new DataProperty(
+            new LiteralNumericExpression((double)limits.max.get()),
+            new StaticPropertyName("maximum")
+          ),
+          limitProperties
+        );
+      }
+      instantiationStatements.add(new ExpressionStatement(
+        new AssignmentExpression(
+          new ComputedMemberExpression(
+            new LiteralStringExpression(memoryDefinition.name),
+            new IdentifierExpression(ModuleGenerator.SYMBOLS_VAR)
+          ),
+          new NewExpression(
+            new StaticMemberExpression(
+              "Memory",
+              new IdentifierExpression("WebAssembly")
+            ),
+            ImmutableList.of(new ObjectExpression(limitProperties))
+          )
+        )
+      ));
+    }
+    instantiationStatements.add(new ReturnStatement(
+      Maybe.of(
+        new CallExpression(
+          new StaticMemberExpression(
+            "instantiate",
+            new IdentifierExpression("WebAssembly")
+          ),
+          ImmutableList.of(
+            new IdentifierExpression(moduleVar),
+            new ObjectExpression(ImmutableList.of(
+              new DataProperty(
+                new IdentifierExpression(SYMBOLS_VAR),
+                new StaticPropertyName(WasmFile.SYMBOLS_MODULE)
+              )
+            ))
+          )
+        )
+      )
+    ));
+    return new FunctionExpression(
+      Maybe.empty(),
+      false,
+      new FormalParameters(
+        ImmutableList.of(new BindingIdentifier(moduleVar)),
+        Maybe.empty()
+      ),
+      new FunctionBody(
+        ImmutableList.empty(),
+        ImmutableList.from(instantiationStatements)
+      )
+    );
+  }
+
   private void generateWrapper() {
-    // XXX should come from analysis of the free variables in the module
+    // XXX should come from analysis of the imported modules
     List<ImportSpecifier> imports = Collections.emptyList();
 
     String rootVar = "root";
     String factoryVar = "factory";
 
-    Statement amdFunctionBody = new IfStatement(
-      ModuleUtil.parseFragmentExpression(
-        "typeof define === 'function' && define['amd']"
-      ),
-      new ExpressionStatement(
-        // define("<OUTPUT_NAME>", ["IMPORTS_FROM"], factory);
-        new CallExpression(
-          new IdentifierExpression("define"),
-          ImmutableList.of(
-            new LiteralStringExpression(moduleName),
-            new ArrayExpression(
-              ImmutableList.from(
-                imports.stream()
-                  .map(i -> i.name.orJust(i.binding.name))
-                  .map(i ->
-                    (SpreadElementExpression)new LiteralStringExpression(i))
-                  .map(Maybe::of)
-                  .collect(Collectors.toList())
-              )
-            ),
-            new IdentifierExpression(factoryVar)
-          )
-        )
-      ),
-      Maybe.of(new ExpressionStatement(
-        // root["<OUTPUT_NAME>"] = factory(root["<IMPORTS_FROM>"]);
-        new AssignmentExpression(
-          new ComputedMemberExpression(
-            new LiteralStringExpression(moduleName),
-            new IdentifierExpression(rootVar)
+    FunctionBody amdFunctionBody = new FunctionBody(
+      ImmutableList.empty(),
+      ImmutableList.of(
+        ModuleUtil.parseFragmentStatement("const define = root.define;"),
+        new IfStatement(
+          ModuleUtil.parseFragmentExpression(
+            "typeof define === 'function' && define.amd"
           ),
-          new CallExpression(
-            new IdentifierExpression(factoryVar),
-            ImmutableList.from(
-              imports.stream()
-                .map(i -> i.name.orJust(i.binding.name))
-                .map(i -> new ComputedMemberExpression(
-                  new LiteralStringExpression(i),
-                  new IdentifierExpression(rootVar)
-                ))
-                .collect(Collectors.toList())
+          new ExpressionStatement(
+            // define("<OUTPUT_NAME>", ["IMPORTS_FROM"], factory);
+            new CallExpression(
+              new IdentifierExpression("define"),
+              ImmutableList.of(
+                new LiteralStringExpression(moduleName),
+                new ArrayExpression(
+                  ImmutableList.from(
+                    imports.stream()
+                      .map(i -> i.name.orJust(i.binding.name))
+                      .map(i ->
+                        (SpreadElementExpression)new LiteralStringExpression(i))
+                      .map(Maybe::of)
+                      .collect(Collectors.toList())
+                  )
+                ),
+                new IdentifierExpression(factoryVar)
+              )
             )
-          )
+          ),
+          Maybe.of(new ExpressionStatement(
+            // root["<OUTPUT_NAME>"] = factory(root["<IMPORTS_FROM>"]);
+            new AssignmentExpression(
+              new ComputedMemberExpression(
+                new LiteralStringExpression(moduleName),
+                new IdentifierExpression(rootVar)
+              ),
+              new CallExpression(
+                new IdentifierExpression(factoryVar),
+                ImmutableList.from(
+                  imports.stream()
+                    .map(i -> i.name.orJust(i.binding.name))
+                    .map(i -> new ComputedMemberExpression(
+                      new LiteralStringExpression(i),
+                      new IdentifierExpression(rootVar)
+                    ))
+                    .collect(Collectors.toList())
+                )
+              )
+            )
+          ))
         )
-      ))
+      )
     );
 
     // (function(__currentScript, IMPORTS_AS) {
@@ -259,10 +346,7 @@ class ModuleGenerator {
           ),
           Maybe.empty()
         ),
-        new FunctionBody(
-          ImmutableList.empty(),
-          ImmutableList.of(amdFunctionBody)
-        )
+        amdFunctionBody
       ),
       ImmutableList.of(
         new ThisExpression(),

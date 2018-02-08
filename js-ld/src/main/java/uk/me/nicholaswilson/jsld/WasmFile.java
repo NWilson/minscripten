@@ -3,10 +3,7 @@ package uk.me.nicholaswilson.jsld;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -22,7 +19,8 @@ import static uk.me.nicholaswilson.jsld.WasmUtil.*;
 
 class WasmFile {
 
-  private static final String SYMBOLS_MODULE = "env";
+  public static final String SYMBOLS_MODULE = "env";
+  public static final String CALL_CTORS_SYMBOL = "__wasm_call_ctors";
 
   private static class ImportEntry {
     public final String module;
@@ -50,13 +48,23 @@ class WasmFile {
   private final List<ImportEntry> imports = new ArrayList<>();
   private final List<ExportEntry> exports = new ArrayList<>();
   private final List<WasmFunctionSignature> signatures = new ArrayList<>(); // TYPE section
-  private final List<WasmFunctionSignature> functionSignatures = new ArrayList<>(); // FUNCTION sect
+  private final List<WasmFunctionSignature> functionSignatures = new ArrayList<>(); // FUNCTION section
+  private final List<WasmTableSignature> tableSignatures = new ArrayList<>(); // TABLE section
+  private final List<WasmMemorySignature> memorySignatures = new ArrayList<>(); // MEMORY section
   private final List<WasmGlobalSignature> globalSignatures = new ArrayList<>(); // GLOBAL section
   private final List<WasmFunctionSignature> functionImports = new ArrayList<>(); // IMPORT section
+  private final List<WasmTableSignature> tableImports = new ArrayList<>(); // IMPORT section
+  private final List<WasmMemorySignature> memoryImports = new ArrayList<>(); // IMPORT section
   private final List<WasmGlobalSignature> globalImports = new ArrayList<>(); // IMPORT section
+  private Integer startFunction; // START section
+  private boolean needsExternalCallCtors;
 
   public Path getPath() {
     return path;
+  }
+
+  public boolean getNeedsExternalCallCtors() {
+    return needsExternalCallCtors;
   }
 
   public WasmFile(Path path) {
@@ -69,24 +77,37 @@ class WasmFile {
         throw new LdException("Invalid Wasm file: bad magic");
       if (buffer.getInt() != 0x00_00_00_01)
         throw new LdException("Invalid Wasm file: bad version");
+      int lastSectionId = -1;
       while (buffer.hasRemaining()) {
         byte sectionId = buffer.get();
         int sectionLen = getUleb32(buffer);
-        if (sectionId == TYPE_SECTION_ID) {
-          readTypes((ByteBuffer)buffer.slice().limit(sectionLen));
-        } else if (sectionId == IMPORT_SECTION_ID) {
-          readImports((ByteBuffer)buffer.slice().limit(sectionLen));
-        } else if (sectionId == FUNCTION_SECTION_ID) {
-          readFunctions((ByteBuffer)buffer.slice().limit(sectionLen));
-        } else if (sectionId == TABLE_SECTION_ID) {
-          readTables((ByteBuffer)buffer.slice().limit(sectionLen));
-        } else if (sectionId == MEMORY_SECTION_ID) {
-          readMemories((ByteBuffer)buffer.slice().limit(sectionLen));
-        } else if (sectionId == GLOBAL_SECTION_ID) {
-          readGlobals((ByteBuffer)buffer.slice().limit(sectionLen));
-        } else if (sectionId == EXPORT_SECTION_ID) {
-          readExports((ByteBuffer)buffer.slice().limit(sectionLen));
+        if (sectionId != CUSTOM_SECTION_ID) {
+          if (sectionId < lastSectionId)
+            throw new LdException("Invalid Wasm file: out of order section");
+          lastSectionId = sectionId;
         }
+        ByteBuffer sectionBuffer = (ByteBuffer)buffer.slice().limit(sectionLen);
+        if (sectionId == TYPE_SECTION_ID) {
+          readTypes(sectionBuffer);
+        } else if (sectionId == IMPORT_SECTION_ID) {
+          readImports(sectionBuffer);
+        } else if (sectionId == FUNCTION_SECTION_ID) {
+          readFunctions(sectionBuffer);
+        } else if (sectionId == TABLE_SECTION_ID) {
+          readTables(sectionBuffer);
+        } else if (sectionId == MEMORY_SECTION_ID) {
+          readMemories(sectionBuffer);
+        } else if (sectionId == GLOBAL_SECTION_ID) {
+          readGlobals(sectionBuffer);
+        } else if (sectionId == EXPORT_SECTION_ID) {
+          readExports(sectionBuffer);
+        } else if (sectionId == START_SECTION_ID) {
+          readStart(sectionBuffer);
+        } else {
+          sectionBuffer.position(sectionBuffer.limit());
+        }
+        if (sectionBuffer.hasRemaining())
+          throw new LdException("Invalid Wasm file: trailing section data");
         buffer.position(buffer.position() + sectionLen);
       }
     } catch (LdException e) {
@@ -111,6 +132,10 @@ class WasmFile {
           new SymbolTable.WasmDefinition(this)
       );
       symbol.setDescriptor(ee.objectDescriptor);
+      if (!hasStartFunction() &&
+          symbol.getSymbolName().equals(CALL_CTORS_SYMBOL)) {
+        needsExternalCallCtors = true;
+      }
     }
   }
 
@@ -165,11 +190,13 @@ class WasmFile {
         case TABLE: {
           WasmTableSignature signature = getTableType(buffer);
           imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Table(signature)));
+          tableImports.add(signature);
           break;
         }
         case MEMORY: {
-          WasmLimits limits = getLimits(buffer);
-          imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Memory(limits)));
+          WasmMemorySignature signature = getMemoryType(buffer);
+          imports.add(new ImportEntry(module, name, new WasmObjectDescriptor.Memory(signature)));
+          memoryImports.add(signature);
           break;
         }
         case GLOBAL: {
@@ -193,11 +220,19 @@ class WasmFile {
   }
 
   private void readTables(ByteBuffer buffer) {
-    // TODO
+    int numTables = getUleb32(buffer);
+    while ((numTables--) > 0) {
+      WasmTableSignature signature = getTableType(buffer);
+      tableSignatures.add(signature);
+    }
   }
 
   private void readMemories(ByteBuffer buffer) {
-    // TODO
+    int numMemories = getUleb32(buffer);
+    while ((numMemories--) > 0) {
+      WasmMemorySignature signature = getMemoryType(buffer);
+      memorySignatures.add(signature);
+    }
   }
 
   private void readGlobals(ByteBuffer buffer) {
@@ -228,7 +263,7 @@ class WasmFile {
           break;
         case MEMORY:
           exports.add(
-            new ExportEntry(name, new WasmObjectDescriptor.Memory(getMemoryLimits(index)))
+            new ExportEntry(name, new WasmObjectDescriptor.Memory(getMemorySignature(index)))
           );
           break;
         case GLOBAL:
@@ -238,6 +273,13 @@ class WasmFile {
           break;
       }
     }
+  }
+
+  private void readStart(ByteBuffer buffer) {
+    int index = getUleb32(buffer);
+    if (index >= functionImports.size() + functionSignatures.size())
+      throw new LdException("Invalid Wasm file: bad start section");
+    startFunction = index;
   }
 
   private WasmFunctionSignature getFunctionSignature(int index) {
@@ -250,11 +292,21 @@ class WasmFile {
   }
 
   private WasmTableSignature getTableSignature(int index) {
-    return null; // XXX
+    int numTableImports = tableImports.size();
+    if (index < numTableImports)
+      return tableImports.get(index);
+    if (index < numTableImports + tableSignatures.size())
+      return tableSignatures.get(index - numTableImports);
+    throw new LdException("Invalid Wasm file: bad table index");
   }
 
-  private WasmLimits getMemoryLimits(int index) {
-    return null; // XXX
+  private WasmMemorySignature getMemorySignature(int index) {
+    int numMemoryImports = memoryImports.size();
+    if (index < numMemoryImports)
+      return memoryImports.get(index);
+    if (index < numMemoryImports + memorySignatures.size())
+      return memorySignatures.get(index - numMemoryImports);
+    throw new LdException("Invalid Wasm file: bad memory index");
   }
 
   private WasmGlobalSignature getGlobalSignature(int index) {
@@ -289,6 +341,10 @@ class WasmFile {
         "Wasm file '" + path + "' contains duplicate symbols:" + sb
       );
     }
+  }
+
+  private boolean hasStartFunction() {
+    return startFunction != null;
   }
 
 }

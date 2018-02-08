@@ -1,13 +1,10 @@
 package uk.me.nicholaswilson.jsld;
 
+import uk.me.nicholaswilson.jsld.wasm.WasmMemorySignature;
 import uk.me.nicholaswilson.jsld.wasm.WasmObjectDescriptor;
 import uk.me.nicholaswilson.jsld.wasm.WasmObjectType;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 class SymbolTable {
@@ -43,6 +40,28 @@ class SymbolTable {
     Symbol symbol = symbols.get(symbolName);
     assert(symbol != null);
     return symbol;
+  }
+
+  public boolean hasSymbol(String symbolName) {
+    return symbols.containsKey(symbolName);
+  }
+
+  public List<MemoryDefinition> provideUndefinedMemories() {
+    List<MemoryDefinition> memoryDefinitions = new ArrayList<>();
+    symbols.values().stream()
+      .filter(Symbol::isUndefined)
+      .forEach(sym -> {
+        WasmObjectDescriptor descriptor = sym.objectDescriptor;
+        if (descriptor == null || descriptor.type != WasmObjectType.MEMORY)
+          return;
+        MemoryDefinition definition = new MemoryDefinition(
+          sym.getSymbolName(),
+          ((WasmObjectDescriptor.Memory)descriptor).signature
+        );
+        sym.setDefinition(definition);
+        memoryDefinitions.add(definition);
+      });
+    return memoryDefinitions;
   }
 
   public void reportUndefined() {
@@ -143,6 +162,20 @@ class SymbolTable {
 
     public WasmDefinition(WasmFile file) {
       wasmFile = file;
+    }
+
+  }
+
+  public static class MemoryDefinition implements Definition {
+
+    public final String name;
+    public final WasmMemorySignature signature;
+
+    public String getSource() { return "<internal>"; }
+
+    public MemoryDefinition(String name, WasmMemorySignature signature) {
+      this.name = name;
+      this.signature = signature;
     }
 
   }

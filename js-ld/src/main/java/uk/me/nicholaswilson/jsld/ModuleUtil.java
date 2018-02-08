@@ -95,13 +95,6 @@ class ModuleUtil {
     assert(id instanceof Import);
     Import i = (Import)id;
 
-    if (i.defaultBinding.isJust()) {
-      // Unsupported, because there is no "default" symbol to import!
-      throw new LdException(
-        "Module cannot contain 'import <default>': " + moduleFileName
-      );
-    }
-
     if (i.namedImports.isEmpty()) {
       // Unsupported, because it doesn't play well with our linking model
       throw new LdException(
@@ -109,7 +102,16 @@ class ModuleUtil {
       );
     }
 
-    if (!i.moduleSpecifier.equals(SYMBOLS_MODULE)) {
+    if (i.moduleSpecifier.equals(SYMBOLS_MODULE)) {
+      if (i.defaultBinding.isJust()) {
+        // Unsupported, because there is no "default" symbol to import!
+        throw new LdException(
+          "Module cannot contain 'import <default>': " + moduleFileName
+        );
+      }
+    } else {
+      // XXX We should allow both exports and symbols modules to import from
+      // external libraries, eg jQuery
       throw new LdException(
         "Module can only import symbols from " + SYMBOLS_MODULE + ": " +
           moduleFileName
@@ -154,7 +156,7 @@ class ModuleUtil {
       return;
     }
 
-    assert (ed instanceof Export);
+    assert(ed instanceof Export);
     Export e = (Export)ed;
 
     List<String> names;
@@ -167,7 +169,7 @@ class ModuleUtil {
       moduleOut.add(fd);
       names = Collections.singletonList(fd.name.name);
     } else {
-      assert (e.declaration instanceof VariableDeclaration);
+      assert(e.declaration instanceof VariableDeclaration);
       VariableDeclaration vd = (VariableDeclaration)e.declaration;
       moduleOut.add(new VariableDeclarationStatement(vd));
       names = new ArrayList<>();
@@ -179,7 +181,7 @@ class ModuleUtil {
           // TODO just laziness, I have no need for it right now and it's fiddly
           throw new LdException("Unsupported array binding - FIXME");
         } else {
-          assert (v.binding instanceof BindingIdentifier);
+          assert(v.binding instanceof BindingIdentifier);
           names.add(((BindingIdentifier)v.binding).name);
         }
       }
@@ -214,6 +216,19 @@ class ModuleUtil {
       assert(statements.maybeTail().isNothing());
       return ((ExpressionStatement)statements.maybeHead().fromJust())
         .expression;
+    } catch (JsError e) {
+      throw new LdException(
+        "Unable to parse fragment '" + fragment + "': " + e
+      );
+    }
+  }
+
+  public static Statement parseFragmentStatement(String fragment) {
+    try {
+      ImmutableList<Statement> statements =
+        Parser.parseScript(fragment).statements;
+      assert(statements.maybeTail().isNothing());
+      return statements.maybeHead().fromJust();
     } catch (JsError e) {
       throw new LdException(
         "Unable to parse fragment '" + fragment + "': " + e

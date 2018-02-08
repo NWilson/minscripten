@@ -27,13 +27,23 @@ high-level API.</p>
 <!-- Mock module "loader" rather than a real AMD loader like require.js -->
 <script type="text/javascript">
   window.define = function(moduleName, requires, factory) {
-    factory().then(function(sampleModule) {
-      const valuePara = document.getElementById('theValue');
-      const button = document.getElementById('theButton');
-      button.onclick = function() {
-        valuePara.textContent = 'Value from Wasm: ' + sampleModule.getAdded();
+    const resolvedRequires = requires.map(function(r) { return window[r] });
+    function onModuleDefined(module) {
+      window[moduleName] = module;
+      if (moduleName == "sample-js-module") {
+        const valuePara = document.getElementById('theValue');
+        const button = document.getElementById('theButton');
+        button.onclick = function() {
+          valuePara.textContent = 'Value from Wasm: ' + module.getAdded();
+        }
       }
-    });
+    }
+    const module = factory(...resolvedRequires);
+    if (module instanceof Promise) {
+      module.then(onModuleDefined)
+    } else {
+      onModuleDefined(module);
+    }
   };
   window.define.amd = true;
 </script>

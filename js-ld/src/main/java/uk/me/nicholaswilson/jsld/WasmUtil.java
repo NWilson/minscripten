@@ -8,9 +8,12 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 class WasmUtil {
 
+  public static final byte CUSTOM_SECTION_ID = 0;
   public static final byte TYPE_SECTION_ID = 1;
   public static final byte IMPORT_SECTION_ID = 2;
   public static final byte FUNCTION_SECTION_ID = 3;
@@ -18,6 +21,7 @@ class WasmUtil {
   public static final byte MEMORY_SECTION_ID = 5;
   public static final byte GLOBAL_SECTION_ID = 6;
   public static final byte EXPORT_SECTION_ID = 7;
+  public static final byte START_SECTION_ID = 8;
 
   private static final CharsetDecoder UTF_8_DECODER =
       StandardCharsets.UTF_8.newDecoder();
@@ -28,6 +32,7 @@ class WasmUtil {
   private static final byte OPCODE_CONST_I64 = 0x42;
   private static final byte OPCODE_CONST_F32 = 0x43;
   private static final byte OPCODE_CONST_F64 = 0x44;
+  private static final byte OPCODE_FUNCTYPE = 0x60;
 
   static {
     UTF_8_DECODER.onMalformedInput(CodingErrorAction.REPORT);
@@ -96,7 +101,11 @@ class WasmUtil {
     return new WasmTableSignature(WasmElemType.of(buffer.get()), getLimits(buffer));
   }
 
-  public static WasmLimits getLimits(ByteBuffer buffer) {
+  public static WasmMemorySignature getMemoryType(ByteBuffer buffer) {
+    return new WasmMemorySignature(getLimits(buffer));
+  }
+
+  private static WasmLimits getLimits(ByteBuffer buffer) {
       return getBoolean(buffer)
         ? new WasmLimits(getUleb32(buffer), getUleb32(buffer))
         : new WasmLimits(getUleb32(buffer));
@@ -137,7 +146,18 @@ class WasmUtil {
   }
 
   public static WasmFunctionSignature getFuncType(ByteBuffer buffer) {
-    // XXX
+    byte op = buffer.get();
+    if (op != OPCODE_FUNCTYPE)
+      throw new LdException("Invalid Wasm file: bad functype opcode");
+    int numParameterTypes = getUleb32(buffer);
+    List<WasmValType> parameterTypes = new ArrayList<>(numParameterTypes);
+    while ((numParameterTypes--) > 0)
+      parameterTypes.add(WasmValType.of(buffer.get()));
+    int numResultTypes = getUleb32(buffer);
+    List<WasmValType> resultTypes = new ArrayList<>(numResultTypes);
+    while ((numResultTypes--) > 0)
+      resultTypes.add(WasmValType.of(buffer.get()));
+    return new WasmFunctionSignature(parameterTypes, resultTypes);
   }
 
 

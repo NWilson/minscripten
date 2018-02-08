@@ -23,11 +23,11 @@ public class WasmObjectDescriptor {
   }
 
   public static class Memory extends WasmObjectDescriptor {
-    public final WasmLimits limits;
+    public final WasmMemorySignature signature;
 
-    public Memory(WasmLimits limits) {
+    public Memory(WasmMemorySignature signature) {
       super(WasmObjectType.MEMORY);
-      this.limits = limits;
+      this.signature = signature;
     }
   }
 
