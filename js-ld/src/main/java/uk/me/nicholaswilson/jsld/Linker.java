@@ -7,14 +7,15 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.List;
+import java.util.*;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
 import java.util.stream.Collectors;
 
+import com.shapesecurity.shift.ast.Script;
+import com.shapesecurity.shift.codegen.PrettyCodeGen;
+import com.shapesecurity.shift.scope.GlobalScope;
+import com.shapesecurity.shift.scope.ScopeAnalyzer;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -74,11 +75,11 @@ public class Linker {
   private List<Path> exportsFilePaths = new ArrayList<>();
 
   @Option(
-    names = { "-i", "--imports" },
+    names = { "-x", "--externs" },
     description = "A JavaScript file containing variable declarations for allowed global variables",
-    paramLabel = "IMPORTS_FILE"
+    paramLabel = "EXTERNS_FILE"
   )
-  private List<Path> importsFilePaths = new ArrayList<>();
+  private List<Path> externsFilePaths = new ArrayList<>();
 
   @Parameters(
     index = "0",
@@ -134,24 +135,24 @@ public class Linker {
     List<ExportsFile> exportsFiles = loadExports();
     assert(wasmFilePath.size() == 1);
     WasmFile wasmFile = new WasmFile(wasmFilePath.get(0));
+    Set<String> externs = loadExterns();
+
     List<SymbolTable.MemoryDefinition> memoryDefinitions =
       SymbolTable.INSTANCE.provideUndefinedMemories();
-
     SymbolTable.INSTANCE.reportUndefined();
 
     String moduleName = outputFilePath.getFileName().toString()
       .replaceFirst("\\.[a-z]+$", "");
-    String moduleStr = new ModuleGenerator(
+    Script moduleScript = new ModuleGenerator(
       symbolsFiles,
       exportsFiles,
       wasmFile,
       memoryDefinitions,
-      moduleName
+      moduleName,
+      externs
     ).generate();
 
-    // TODO Run shift-reduce over the whole thing to detect imports, and check
-    //   they're declared, and mark imports used
-
+    String moduleStr = PrettyCodeGen.codeGen(moduleScript);
     try (
       BufferedWriter writer =
         Files.newBufferedWriter(outputFilePath, StandardCharsets.UTF_8)
@@ -176,6 +177,16 @@ public class Linker {
     return exportsFilePaths.stream()
       .map(ExportsFile::new)
       .collect(Collectors.toList());
+  }
+
+  private Set<String> loadExterns() {
+    Set<String> externs = new HashSet<>();
+    externs.add("window");
+    externsFilePaths.stream()
+      .map(ExternsFile::new)
+      .map(ExternsFile::getDeclarations)
+      .forEach(externs::addAll);
+    return externs;
   }
 
 
@@ -207,10 +218,10 @@ public class Linker {
             "Exports specified for pre-link"
           );
         }
-        if (!l.importsFilePaths.isEmpty()) {
+        if (!l.externsFilePaths.isEmpty()) {
           throw new CommandLine.ParameterException(
             cmd,
-            "Imports specified for pre-link"
+            "Externs specified for pre-link"
           );
         }
         l.generateImports();

@@ -3,12 +3,15 @@ package uk.me.nicholaswilson.jsld;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import com.shapesecurity.functional.data.ImmutableList;
 import com.shapesecurity.functional.data.Maybe;
 import com.shapesecurity.shift.ast.*;
-import com.shapesecurity.shift.codegen.PrettyCodeGen;
+import com.shapesecurity.shift.scope.GlobalScope;
+import com.shapesecurity.shift.scope.ScopeAnalyzer;
+import com.shapesecurity.shift.scope.Variable;
 import uk.me.nicholaswilson.jsld.SymbolTable.MemoryDefinition;
 import uk.me.nicholaswilson.jsld.wasm.WasmLimits;
 
@@ -24,40 +27,64 @@ class ModuleGenerator {
   public static final String EXPORTS_VAR = "__exports";
   public static final String SYMBOLS_VAR = "__symbols";
 
-  private List<Statement> script = new ArrayList<>();
+  private List<Statement> scriptStatements = new ArrayList<>();
   private final List<SymbolsFile> symbolsFiles;
   private final List<ExportsFile> exportsFiles;
   private final WasmFile wasmFile;
   private final List<MemoryDefinition> memoryDefinitions;
   private final String moduleName;
+  private final Set<String> externs;
 
   public ModuleGenerator(
     List<SymbolsFile> symbolsFiles,
     List<ExportsFile> exportsFiles,
     WasmFile wasmFile,
     List<MemoryDefinition> memoryDefinitions,
-    String moduleName
+    String moduleName,
+    Set<String> externs
   ) {
     this.symbolsFiles = symbolsFiles;
     this.exportsFiles = exportsFiles;
     this.wasmFile = wasmFile;
     this.memoryDefinitions = memoryDefinitions;
     this.moduleName = moduleName;
+    this.externs = externs;
   }
 
-  public String generate() {
+  public Script generate() {
     generatePreamble();
     generateJsSymbols();
     generateJsExports();
     generatePostamble();
     generateWrapper();
-    return generateScript();
+    Script script = generateScript();
+    analyzeExterns(script);
+    return script;
+  }
+
+  private void analyzeExterns(Script script) {
+    // Run the scope analyzer to detect for any dodgy use of global variables
+    // that shouldn't be allowed (eg a global variable leak).
+    GlobalScope scope = ScopeAnalyzer.analyze(script);
+    List<Variable> bannedVariables = scope.variables().stream()
+      .filter(v -> !externs.contains(v.name))
+      .collect(Collectors.toList());
+
+    if (!bannedVariables.isEmpty()) {
+      StringBuilder sb = new StringBuilder();
+      for (Variable variable : bannedVariables) {
+        sb.append("\n  ").append(variable.name);
+      }
+      throw new LdException(
+        "Error - module contains unbound variables:" + sb.toString()
+      );
+    }
   }
 
 
   private void generatePreamble() {
     ModuleUtil.appendFragment(
-      script,
+      scriptStatements,
       "const " + EXPORTS_VAR + " = {};\n" +
         "const " + SYMBOLS_VAR + " = {};"
     );
@@ -65,19 +92,19 @@ class ModuleGenerator {
 
   private void generateJsSymbols() {
     for (SymbolsFile symbolsFile : symbolsFiles) {
-      symbolsFile.appendModule(this, script);
+      symbolsFile.appendModule(this, scriptStatements);
     }
   }
 
   private void generateJsExports() {
     for (ExportsFile exportsFile : exportsFiles) {
-      exportsFile.appendModule(this, script);
+      exportsFile.appendModule(this, scriptStatements);
     }
   }
 
   private void generatePostamble() {
     // Construct an expression that will calculate the file path for the WASM
-    // module, relative to the current script, and using the filename it has
+    // module, relative to the current scriptStatements, and using the filename it has
     // on disk right now.
     //  -> new URL("<WASM_FILENAME>", __currentScript.src).toString()
     String wasmFileName = wasmFile.getPath().getFileName().toString();
@@ -163,7 +190,7 @@ class ModuleGenerator {
       )
     );
 
-    script.add(new ReturnStatement(Maybe.of(ce)));
+    scriptStatements.add(new ReturnStatement(Maybe.of(ce)));
   }
 
   private Expression generateInstantiation() {
@@ -319,7 +346,7 @@ class ModuleGenerator {
           ),
           new FunctionBody(
             ImmutableList.empty(),
-            ImmutableList.from(script)
+            ImmutableList.from(scriptStatements)
           )
         )
       ),
@@ -354,15 +381,13 @@ class ModuleGenerator {
       )
     );
 
-    script = Collections.singletonList(new ExpressionStatement(amdRunner));
+    scriptStatements = Collections.singletonList(new ExpressionStatement(amdRunner));
   }
 
-  private String generateScript() {
-    return PrettyCodeGen.codeGen(
-      new Script(
-        ImmutableList.from(new Directive("use strict")),
-        ImmutableList.from(script)
-      )
+  private Script generateScript() {
+    return new Script(
+      ImmutableList.from(new Directive("use strict")),
+      ImmutableList.from(scriptStatements)
     );
   }
 
