@@ -15,7 +15,8 @@ class SymbolsFile {
 
   private final Path path;
   private final Module module;
-  private final List<ImportSpecifier> imports = new ArrayList<>();
+  private final List<ImportSpecifier> symbolImports = new ArrayList<>();
+  private final List<Import> requirementsImports = new ArrayList<>();
   private final List<ExportSpecifier> exports = new ArrayList<>();
   private final List<Statement> code = new ArrayList<>();
 
@@ -40,15 +41,19 @@ class SymbolsFile {
       module,
       path.toString(),
       code,
-      imports,
+      symbolImports,
+      requirementsImports,
       exports
     );
 
-    for (ImportSpecifier is : imports) {
+    for (ImportSpecifier is : symbolImports) {
       SymbolTable.Symbol symbol = SymbolTable.INSTANCE.addUndefined(
         is.name.orJust(is.binding.name)
       );
       symbol.markUsed();
+    }
+    for (Import i : requirementsImports) {
+      RequirementsTable.INSTANCE.add(i.moduleSpecifier);
     }
     for (ExportSpecifier es : exports) {
       SymbolTable.INSTANCE.addDefined(
@@ -70,7 +75,11 @@ class SymbolsFile {
       return;
 
     List<Statement> moduleStatements = new ArrayList<>();
-    generator.appendImports(moduleStatements, imports);
+    generator.appendImports(
+      moduleStatements,
+      symbolImports,
+      requirementsImports
+    );
     moduleStatements.addAll(code);
     generator.appendExports(
       moduleStatements,

@@ -7,12 +7,8 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import com.shapesecurity.shift.ast.AssignmentExpression;
-import com.shapesecurity.shift.ast.ComputedMemberExpression;
-import com.shapesecurity.shift.ast.ExpressionStatement;
-import com.shapesecurity.shift.ast.IdentifierExpression;
-import com.shapesecurity.shift.ast.LiteralStringExpression;
-import com.shapesecurity.shift.ast.Statement;
+import com.shapesecurity.functional.data.ImmutableList;
+import com.shapesecurity.shift.ast.*;
 import uk.me.nicholaswilson.jsld.wasm.*;
 
 import static uk.me.nicholaswilson.jsld.WasmUtil.*;
@@ -120,11 +116,13 @@ class WasmFile {
     validateNames();
 
     for (ImportEntry ie : imports) {
-      if (!ie.module.equals(SYMBOLS_MODULE))
-        continue;
-      SymbolTable.Symbol symbol = SymbolTable.INSTANCE.addUndefined(ie.name);
-      symbol.markUsed();
-      symbol.setDescriptor(ie.objectDescriptor);
+      if (ie.module.equals(SYMBOLS_MODULE)) {
+        SymbolTable.Symbol symbol = SymbolTable.INSTANCE.addUndefined(ie.name);
+        symbol.markUsed();
+        symbol.setDescriptor(ie.objectDescriptor);
+      } else {
+        RequirementsTable.INSTANCE.add(ie.module);
+      }
     }
     for (ExportEntry ee : exports) {
       SymbolTable.Symbol symbol = SymbolTable.INSTANCE.addDefined(
@@ -161,6 +159,21 @@ class WasmFile {
         )
       ));
     }
+  }
+
+  public ImmutableList<ObjectProperty> getImports() {
+    Set<String> requirements = new LinkedHashSet<>();
+    imports.stream().filter(i -> !i.module.equals(SYMBOLS_MODULE))
+      .forEach(i -> requirements.add(i.module));
+    return ImmutableList.from(
+      requirements.stream().map(i -> {
+        RequirementsTable.Requirement r = RequirementsTable.INSTANCE.get(i);
+        return (ObjectProperty) new DataProperty(
+          new IdentifierExpression(r.variableName),
+          new StaticPropertyName(r.specifier)
+        );
+      }).collect(Collectors.toList())
+    );
   }
 
 

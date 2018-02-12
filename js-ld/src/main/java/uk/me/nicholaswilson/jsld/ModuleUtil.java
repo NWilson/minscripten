@@ -40,24 +40,31 @@ class ModuleUtil {
    * of nodes which make up the Module after the imports/exports are removed.
    * @param module     The input Module
    * @param moduleOut  The output of the Module's contents stripped of exports
-   * @param importsOut The output of the Module's imports (or null to disallow)
+   * @param symbolImportsOut The output of the Module's imports
+   * @param requirementsImportsOut The output of the Module's non-symbol imports
    * @param exportsOut The output of the Module's exports
    */
   public static void extractImportsExports(
     Module module,
     String moduleFileName,
     List<Statement> moduleOut,
-    List<ImportSpecifier> importsOut,
+    List<ImportSpecifier> symbolImportsOut,
+    List<Import> requirementsImportsOut,
     List<ExportSpecifier> exportsOut
   ) {
     for (ImportDeclarationExportDeclarationStatement s : module.items) {
       if (s instanceof ImportDeclaration) {
-        if (importsOut == null) {
+        if (symbolImportsOut == null) {
           throw new LdException(
             "Module cannot contain 'import': " + moduleFileName
           );
         }
-        extractImport((ImportDeclaration)s, moduleFileName, importsOut);
+        extractImport(
+          (ImportDeclaration)s,
+          moduleFileName,
+          symbolImportsOut,
+          requirementsImportsOut
+        );
         continue;
       }
 
@@ -83,7 +90,8 @@ class ModuleUtil {
   private static void extractImport(
     ImportDeclaration id,
     String moduleFileName,
-    List<ImportSpecifier> importsOut
+    List<ImportSpecifier> symbolImportsOut,
+    List<Import> requirementsImportsOut
   ) {
     if (id instanceof ImportNamespace) {
       // Unsupported, because it doesn't play well with our linking model
@@ -95,31 +103,26 @@ class ModuleUtil {
     assert(id instanceof Import);
     Import i = (Import)id;
 
-    if (i.namedImports.isEmpty()) {
-      // Unsupported, because it doesn't play well with our linking model
-      throw new LdException(
-        "Module cannot contain 'import <all>': " + moduleFileName
-      );
-    }
-
     if (i.moduleSpecifier.equals(SYMBOLS_MODULE)) {
+      if (i.namedImports.isEmpty()) {
+        // Unsupported, because it doesn't play well with our linking model
+        throw new LdException(
+          "Module cannot contain 'import <all>': " + moduleFileName
+        );
+      }
       if (i.defaultBinding.isJust()) {
         // Unsupported, because there is no "default" symbol to import!
         throw new LdException(
           "Module cannot contain 'import <default>': " + moduleFileName
         );
       }
-    } else {
-      // XXX We should allow both exports and symbols modules to import from
-      // external libraries, eg jQuery
-      throw new LdException(
-        "Module can only import symbols from " + SYMBOLS_MODULE + ": " +
-          moduleFileName
-      );
-    }
 
-    for (ImportSpecifier is : i.namedImports)
-      importsOut.add(is);
+      for (ImportSpecifier is : i.namedImports)
+        symbolImportsOut.add(is);
+
+    } else {
+      requirementsImportsOut.add(i);
+    }
   }
 
   private static void extractExport(

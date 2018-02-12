@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import com.shapesecurity.functional.data.ImmutableList;
 import com.shapesecurity.functional.data.Maybe;
@@ -239,12 +240,15 @@ class ModuleGenerator {
           ),
           ImmutableList.of(
             new IdentifierExpression(moduleVar),
-            new ObjectExpression(ImmutableList.of(
-              new DataProperty(
-                new IdentifierExpression(SYMBOLS_VAR),
-                new StaticPropertyName(WasmFile.SYMBOLS_MODULE)
+            new ObjectExpression(
+              ImmutableList.cons(
+                new DataProperty(
+                  new IdentifierExpression(SYMBOLS_VAR),
+                  new StaticPropertyName(WasmFile.SYMBOLS_MODULE)
+                ),
+                wasmFile.getImports()
               )
-            ))
+            )
           )
         )
       )
@@ -264,8 +268,7 @@ class ModuleGenerator {
   }
 
   private void generateWrapper() {
-    // XXX should come from analysis of the imported modules
-    List<ImportSpecifier> imports = Collections.emptyList();
+    List<ImportSpecifier> imports = RequirementsTable.INSTANCE.getImports();
 
     String rootVar = "root";
     String factoryVar = "factory";
@@ -393,23 +396,61 @@ class ModuleGenerator {
 
   public void appendImports(
     List<Statement> statementsOut,
-    List<ImportSpecifier> imports
+    List<ImportSpecifier> symbolImports,
+    List<Import> requirementsImports
   ) {
-    statementsOut.add(new VariableDeclarationStatement(
-      // let <NAME>, ...
-      new VariableDeclaration(
-        VariableDeclarationKind.Let,
-        ImmutableList.from(
-          imports.stream()
-            .map(is -> new VariableDeclarator(
-              new BindingIdentifier(is.binding.name),
-              Maybe.empty()
+    List<VariableDeclarator> requirementsDeclarators = new ArrayList<>();
+    for (Import i : requirementsImports) {
+      RequirementsTable.Requirement r =
+        RequirementsTable.INSTANCE.get(i.moduleSpecifier);
+      if (i.defaultBinding.isJust() &&
+        !i.defaultBinding.fromJust().name.equals(r.variableName)) {
+        requirementsDeclarators.add(
+          new VariableDeclarator(
+            new BindingIdentifier(i.defaultBinding.fromJust().name),
+            Maybe.of(new IdentifierExpression(r.variableName))
+          )
+        );
+      }
+      for (ImportSpecifier is : i.namedImports) {
+        requirementsDeclarators.add(
+          new VariableDeclarator(
+            new BindingIdentifier(is.binding.name),
+            Maybe.of(new ComputedMemberExpression(
+              new LiteralStringExpression(is.name.orJust(is.binding.name)),
+              new IdentifierExpression(r.variableName)
             ))
-            .collect(Collectors.toList())
+          )
+        );
+      }
+    }
+    if (!requirementsDeclarators.isEmpty()) {
+      statementsOut.add(new VariableDeclarationStatement(
+        // const <NAME> = <REQ>
+        new VariableDeclaration(
+          VariableDeclarationKind.Const,
+          ImmutableList.from(requirementsDeclarators)
         )
-      )
-    ));
-    for (ImportSpecifier is : imports) {
+      ));
+    }
+
+    if (!symbolImports.isEmpty()) {
+      statementsOut.add(new VariableDeclarationStatement(
+        // let <NAME>, ...
+        new VariableDeclaration(
+          VariableDeclarationKind.Let,
+          ImmutableList.from(
+            symbolImports.stream()
+              .map(is -> new VariableDeclarator(
+                new BindingIdentifier(is.binding.name),
+                Maybe.empty()
+              ))
+              .collect(Collectors.toList())
+          )
+        )
+      ));
+    }
+    for (ImportSpecifier is : symbolImports) {
       // <NAME> = function(...args) { late-bind '<IMPORTED_NAME>' to name }
       statementsOut.add(new ExpressionStatement(
         new AssignmentExpression(

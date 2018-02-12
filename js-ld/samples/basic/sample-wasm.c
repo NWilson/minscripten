@@ -1,5 +1,4 @@
 int js_get_int(void);
-
 int wasm_add_one(void) {
   return 1 + js_get_int();
 }
