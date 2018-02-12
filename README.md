@@ -1,4 +1,4 @@
-# minscripten
+# minscripten [![Build Status](https://travis-ci.org/NWilson/minscripten.svg?branch=master)](https://travis-ci.org/NWilson/minscripten)
 A tiny WebAssembly toolchain! Compiles and links C to WebAssembly and JavaScript
 
 ## Goals

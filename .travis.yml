@@ -1,0 +1,5 @@
+language: java
+jdk:
+  - openjdk8
+install: cd js-ld && mvn install -DskipTests=true -Dmaven.javadoc.skip=true -B -V
+script:  mvn test -B
