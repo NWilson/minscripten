@@ -181,7 +181,6 @@ public class Linker {
 
   private Set<String> loadExterns() {
     Set<String> externs = new HashSet<>();
-    externs.add("window");
     externsFilePaths.stream()
       .map(ExternsFile::new)
       .map(ExternsFile::getDeclarations)

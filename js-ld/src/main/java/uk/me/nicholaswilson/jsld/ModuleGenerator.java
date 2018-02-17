@@ -24,6 +24,7 @@ class ModuleGenerator {
   // popular third-party script called "symbols"...  Thus I'm trying to keep to
   // an absolute minimum any pollution of the namespace that modules are nested
   // inside, and use underscores for those symbols to make sure.
+  public static final String ROOT_VAR = "__root";
   public static final String CURRENT_SCRIPT_VAR = "__currentScript";
   public static final String EXPORTS_VAR = "__exports";
   public static final String SYMBOLS_VAR = "__symbols";
@@ -326,9 +327,9 @@ class ModuleGenerator {
       )
     );
 
-    // (function(__currentScript, IMPORTS_AS) {
+    // (function(__root, __currentScript, IMPORTS_AS) {
     //   <BODY>
-    // }).bind(document.currentScript)
+    // }).bind(null, this, document.currentScript)
     Expression factoryExpression = new CallExpression(
       new StaticMemberExpression(
         "bind",
@@ -337,12 +338,15 @@ class ModuleGenerator {
           false,
           new FormalParameters(
             ImmutableList.cons(
-              new BindingIdentifier(CURRENT_SCRIPT_VAR),
-              ImmutableList.from(
-                imports.stream()
-                  .map(i -> i.binding.name)
-                  .map(BindingIdentifier::new)
-                  .collect(Collectors.toList())
+              new BindingIdentifier(ROOT_VAR),
+              ImmutableList.cons(
+                new BindingIdentifier(CURRENT_SCRIPT_VAR),
+                ImmutableList.from(
+                  imports.stream()
+                    .map(i -> i.binding.name)
+                    .map(BindingIdentifier::new)
+                    .collect(Collectors.toList())
+                )
               )
             ),
             Maybe.empty()
@@ -355,10 +359,13 @@ class ModuleGenerator {
       ),
       ImmutableList.cons(
         new LiteralNullExpression(),
-        ImmutableList.of(
-          new StaticMemberExpression(
-            "currentScript",
-            new IdentifierExpression("document")
+        ImmutableList.cons(
+          new ThisExpression(),
+          ImmutableList.of(
+            new StaticMemberExpression(
+              "currentScript",
+              new IdentifierExpression("document")
+            )
           )
         )
       )
