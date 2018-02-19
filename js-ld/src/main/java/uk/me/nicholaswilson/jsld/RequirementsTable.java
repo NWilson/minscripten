@@ -43,7 +43,7 @@ class RequirementsTable {
     specifier.codePoints()
       .filter(c -> c == '$' || c == '_' || Character.isLetterOrDigit(c))
       .forEachOrdered(sb::appendCodePoint);
-    String base = sb.toString();
+    String base = "__" + sb.toString();
     if (!base.isEmpty() && variableNames.add(base))
       return base;
     for (int i = 1; ; ++i) {
