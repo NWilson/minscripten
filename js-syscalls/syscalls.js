@@ -8,6 +8,8 @@ const MINSCRIPTEN_BUILD = "1";
 // Helpers
 //
 
+const isNodeJs = __root.toString() === '[object global]';
+
 class ExitException extends Error {
   constructor(status) {
     super();
@@ -97,7 +99,78 @@ const PRIO_PROCESS = 0, PRIO_PGRP = 1, PRIO_USER = 2;
 const RUSAGE_SELF = 0, RUSAGE_THREAD = 1, RUSAGE_CHILDREN = -1;
 const sizeofRusage = 2 * sizeofTimeval + 30 * sizeofLong;
 
-import { __linear_memory as linearMem } from "__symbols";
+import { memory as linearMem } from "__symbols"; // XXX should be __linear_memory
+
+const Buffer = isNodeJs ? __root.Buffer : class Buffer extends Uint8Array {
+  /*
+  static from(value, offsetOrEncoding, length) {
+    function fromString(value, encoding) {
+      if (typeof encoding !== 'string' || encoding === '')
+        encoding = 'utf8';
+      let len = value.length * 4; // maximum length, for UTF-8
+      const buf = new Buffer(len);
+      len = buf.write(value, 0, buf.length, encoding);
+      return buf.slice(0, len);
+    }
+    if (typeof value === 'string')
+      return fromString(value, offsetOrEncoding);
+    throw new TypeError('Unsupported Buffer constructor');
+  }
+  slice(start, end) {
+    const length = this.length;
+    if (start === undefined)
+      start = 0;
+    if (end === undefined)
+      end = length;
+    start = Math.max(0, Math.min(start < 0 ? length - start : start, length));
+    end = Math.max(start, Math.min(end < 0 ? length - end : end, length));
+    return new Buffer(this.buffer, this.byteOffset + start, end - start);
+  }
+  */
+  write(string, offset, length, encoding) {
+    if (typeof offset !== 'number')
+      offset = 0;
+    if (typeof length !== 'number')
+      length = this.length;
+    if (typeof encoding !== 'string' || encoding === '')
+      encoding = 'utf8';
+    if (offset < 0 || length < 0 || offset + length > this.length)
+      throw new RangeError('Out of bounds write');
+    if (encoding !== 'utf8' && encoding !== 'utf-8')
+      throw new TypeError('Unsupported encoding: ' + encoding);
+    const end = offset + length;
+    let outIdx = offset;
+    for (let inIdx = 0; inIdx < string.length; ++inIdx) {
+      let c = string.codePointAt(inIdx);
+      if (c >= 0x10000)
+        ++inIdx; // skip trailing surrogate half
+      else if (c >= 0xd800 && c <= 0xdfff)
+        c = 0xfffd; // replace unpaired surrogate half
+      else if (c > 0x10ffff)
+        c = 0xfffd; // replace out-of-range surrogate pair
+      if (c < 0x80) {
+        if (outIdx + 1 > end) break;
+        this[outIdx++] = c;
+      } else if (c < 0x800) {
+        if (outIdx + 2 > end) break;
+        this[outIdx++] = 0xc0 | (c >> 6);
+        this[outIdx++] = 0x80 | (c & 0x3f);
+      } else if (c < 0x10000) {
+        if (outIdx + 3 > end) break;
+        this[outIdx++] = 0xe0 | (c >> 12);
+        this[outIdx++] = 0x80 | ((c >> 6) & 0x3f);
+        this[outIdx++] = 0x80 | (c & 0x3f);
+      } else {
+        if (outIdx + 4 > end) break;
+        this[outIdx++] = 0xf0 | (c >> 18);
+        this[outIdx++] = 0x80 | ((c >> 12) & 0x3f);
+        this[outIdx++] = 0x80 | ((c >> 6) & 0x3f);
+        this[outIdx++] = 0x80 | (c & 0x3f);
+      }
+    }
+    return outIdx - offset;
+  }
+};
 
 const memory = new class {
   constructor() {
@@ -114,7 +187,7 @@ const memory = new class {
     let u8 = this.u8;
     if (u8 !== null && u8.buffer == linearMem.buffer)
       return u8;
-    return (this.u8 = new Uint8Array(linearMem.buffer));
+    return (this.u8 = new Buffer(linearMem.buffer));
   }
   getU32() {
     let u32 = this.u32;
@@ -137,7 +210,7 @@ function writeU32(address, value) {
   address = address >>> 0;
   value = value >>> 0;
   const u32 = memory.getU32();
-  if ((address & 0x3) !== 0 || (address >>= 2) >= a.length)
+  if ((address & 0x3) !== 0 || (address >>= 2) >= u32.length)
     return false;
   u32[address] = value;
   return true;
@@ -146,46 +219,110 @@ function writeS32(address, value) {
   address = address >>> 0;
   value = value | 0;
   const s32 = memory.getS32();
-  if ((address & 0x3) !== 0 || (address >>= 2) >= a.length)
+  if ((address & 0x3) !== 0 || (address >>= 2) >= s32.length)
     return false;
   s32[address] = value;
   return true;
 }
+function writeU64(address, value) {
+  value = Math.floor(value);
+  const max =  0xfffffffffffff800;
+  value = Math.max(0, Math.min(value, max));
+  const low = value >>> 0;
+  const high = Math.floor(value / 0x100000000) >>> 0;
+  return writeU32(address, low) && writeU32(address + 4, high);
+}
 function writeS64(address, value) {
-  // XXX return false on failure
-  return false;
+  value = Math.floor(value);
+  const max =  0x7ffffffffffffc00;
+  const min = -0x7ffffffffffffc00;
+  value = Math.max(min, Math.min(value, max));
+  const low = value >>> 0;
+  const high = Math.floor(value / 0x100000000) | 0;
+  return writeU32(address, low) && writeS32(address + 4, high);
 }
 function writeString(address, str, maxLen) {
-  // XXX return false on failure
-  return false;
+  address = address >>> 0;
+  maxLen = maxLen >>> 0;
+  const u8 = memory.getU8();
+  if (maxLen < 1 || address + maxLen > u8.length)
+    return false;
+  const len = u8.write(str, address, maxLen - 1, 'utf8');
+  u8[address + len] = 0; // Null-terminate
+  return true;
 }
-function writeMem(address, value, len) {
-  // XXX return false on failure
-  return false;
+function writeFill(address, value, len) {
+  address = address >>> 0;
+  value = value | 0;
+  const u8 = memory.getU8();
+  if (address + len >= u8.length)
+    return false;
+  u8.fill(value, address, address + len);
+  return true;
+}
+function writeUint8Array(address, array) {
+  address = address >>> 0;
+  const u8 = memory.getU8();
+  if (address + array.length > u8.length)
+    return false;
+  u8.set(array, address);
+  return true;
 }
 const writeUint = writeU32,
+    writeInt = writeS32,
     writeUlong = writeU32,
     writeLong = writeS32,
+    writeUlonglong = writeU64,
     writeLonglong = writeS64;
 const writeGidt = writeUint,
-    writeUidt = writeUint;
-const writeClockt = writeLong,
+    writeUidt = writeUint,
+    writeClockt = writeLong,
     writeTimet = writeLonglong,
     writeSusecondst = writeLonglong;
 
 function readU32(address) {
   address = address >>> 0;
   const u32 = memory.getU32();
-  if ((address & 0x3) !== 0 || (address >>= 2) >= a.length)
+  if ((address & 0x3) !== 0 || (address >>= 2) >= u32.length)
     return [0, false];
   return [u32[address], true];
 }
-function readU64(address) {
-  // XXX return [value, success-bool]
-  // XXX handle truncation by capping to maximum JS value
-  return [0, false];
+function readS32(address) {
+  address = address >>> 0;
+  const s32 = memory.getS32();
+  if ((address & 0x3) !== 0 || (address >>= 2) >= s32.length)
+    return [0, false];
+  return [s32[address], true];
 }
-const readUint = readU32, readUlong = readU32;
+function readU64(address) {
+  let low, high, result;
+  [low, result] = readU32(address);
+  if (!result)
+    return [0, false];
+  [high, result] = readU32(address + 4);
+  if (!result)
+    return [0, false];
+  return [high * 0x100000000 + low, true];
+}
+function readS64(address) {
+  let low, high, result;
+  [low, result] = readU32(address);
+  if (!result)
+    return [0, false];
+  [high, result] = readS32(address + 4);
+  if (!result)
+    return [0, false];
+  let value = high * 0x100000000;
+  if (Math.sign(high) < 0) value -= low;
+  else value += low;
+  return [value, true];
+}
+const readUint = readU32,
+    readInt = readS32,
+    readUlong = readU32,
+    readLong = readS32,
+    readUlonglong = readU64,
+    readLonglong = readS64;
 
 function toUlong(long) {
   return long >>> 0; // Coerce to u32
@@ -211,6 +348,7 @@ class File {
 class Console extends File {
   // XXX
   constructor(console) {
+    super();
     this.console = console;
   }
 }
@@ -242,6 +380,12 @@ const fds = new class extends Array {
   }
   isValid(fd) {
     return fd >= 0 && fd < this.length && this[fd] !== null;
+  }
+  next() {
+    for (let i = 0; i < this.length; ++i)
+      if (this[i] === null)
+        return i;
+    return this.length;
   }
 };
 
@@ -303,8 +447,8 @@ function ePerm() {
   return -EPERM;
 }
 
-export { fdNotSock as __syscall_accept4 }; // No sockets in minscripten
-export { fdNotSock as __syscall_accept }; // No sockets in minscripten
+export { fdNotSock as __syscall_accept4 } // No sockets in minscripten
+export { fdNotSock as __syscall_accept } // No sockets in minscripten
 
 function adjtimex(tx) {
   const [mode, result] = readUint(tx);
@@ -312,7 +456,7 @@ function adjtimex(tx) {
     return -EFAULT;
   if (mode !== 0 && mode !== ADJ_OFFSET_SS_READ)
     return -EPERM;
-  if (!writeMem(tx, 0, sizeofTimex))
+  if (!writeFill(tx, 0, sizeofTimex))
     return -EFAULT;
   return TIME_OK;
 }
@@ -321,19 +465,18 @@ export function __syscall_adjtimex(tx) {
   return adjtimex(tx);
 }
 
-export { ePerm as __syscall_chroot }; // Fails unless root
+export { ePerm as __syscall_chroot } // Fails unless root
 
-const getMonotonicTime;
-const getMonotonicResolution;
-let lastMonotonicTime = Number.MIN_VALUE, getMonotonicBias = 0;
-if (__root.process !== undefined) {
-  // Node.js
+let getMonotonicTime;
+let getMonotonicResolution;
+let lastMonotonicTime = Number.NEGATIVE_INFINITY, getMonotonicBias = 0;
+if (isNodeJs) {
   getMonotonicTime = function() {
     const [seconds, nanos] = __root.process.hrtime();
     return seconds*1e3 + (nanos/1e6);
   };
   getMonotonicResolution = 1e3; // Guess that it's microsecond resolution
-} else if (__root.performance) {
+} else if (__root.performance !== undefined) {
   getMonotonicTime = __root.performance.now;
   getMonotonicResolution = 1e3; // Guess that it's microsecond resolution
 } else {
@@ -348,7 +491,7 @@ export function __syscall_clock_adjtime(clockId, tx) {
   return adjtimex(tx);
 }
 export function __syscall_clock_getres(clockId, ts) {
-  const resolution;
+  let resolution;
   switch (clockId) {
   case CLOCK_REALTIME:
     resolution = 15e6; // Guess that it's 15ms resolution
@@ -386,21 +529,21 @@ export function __syscall_clock_gettime(clockId, ts) {
     return -EINVAL;
   }
   const seconds = Math.floor(now);
-  let nanoseconds = Math.floor((now - seconds) * 1e9;
+  let nanoseconds = Math.floor((now - seconds) * 1e9);
   nanoseconds = Math.max(0, Math.min(nanoseconds, 999999999));
   if (!writeTimet(ts, seconds) ||
       !writeLong(ts += sizeofTimet, nanoseconds))
     return -EFAULT;
   return 0;
 }
-export { eNosys as __syscall_clock_nanosleep }; // No sleep in minscripten
+export { eNosys as __syscall_clock_nanosleep } // No sleep in minscripten
 export function __syscall_clock_settime(clockId, ts) {
   if (clockId < CLOCK_REALTIME || clockId > CLOCK_MONOTONIC)
     return -EINVAL;
   return -EPERM;
 }
 
-export { eNosys as __syscall_clone }; // No multiprocess in minscripten
+export { eNosys as __syscall_clone } // No multiprocess in minscripten
 
 export function __syscall_close(fd) {
   if (!fds.isValid(fd))
@@ -434,23 +577,23 @@ export function __syscall_dup3(oldFd, newFd, flags) {
 export function __syscall_dup(oldFd) {
   if (!fds.isValid(oldFd))
     return -EBADF;
-  const newFd = nextFd();
+  const newFd = fds.next();
   if (newFd >= rlimits.nofile.cur)
     return -EMFILE;
   fds[newFd] = new Fd(fds[oldFd].file.ref(), 0);
   return newFd;
 }
 
-export { eNosys as __syscall_execveat }; // No multiprocess in minscripten
-export { eNosys as __syscall_execve }; // No multiprocess in minscripten
+export { eNosys as __syscall_execveat } // No multiprocess in minscripten
+export { eNosys as __syscall_execve } // No multiprocess in minscripten
 
 function exit(status) {
   throw new ExitException(status);
 }
-export { exit as __syscall_exit };
-export { exit as __syscall_exit_group };
+export { exit as __syscall_exit }
+export { exit as __syscall_exit_group }
 
-export { eNosys as __syscall_fork }; // No multiprocess in minscripten
+export { eNosys as __syscall_fork } // No multiprocess in minscripten
 
 export function __syscall_getcpu(cpu, node) {
   if (!writeUint(cpu, 0) || !writeUint(node, 0))
@@ -484,7 +627,7 @@ export function __syscall_getgroups(count, list) {
   return gs.length;
 }
 
-export { fdNotSock as __syscall_getpeername }; // No sockets in minscripten
+export { fdNotSock as __syscall_getpeername } // No sockets in minscripten
 
 export function __syscall_getpgid(pid) {
   if (pid !== 0 && pid !== proc.pid)
@@ -523,10 +666,11 @@ export function __syscall_getrandom(buf, bufLen, flags) {
   const crypto = __root.crypto;
   let remLen = bufLen;
   while (remLen > 0) {
-    crypto.getRandomValues(vals);
-    const len = Math.min(bufLen, vals.length);
-    if (!writeArray(buf, vals, len))
+    const valsSliced = remLen >= vals.length ? vals : vals.slice(0, remLen);
+    crypto.getRandomValues(valsSliced);
+    if (!writeUint8Array(buf, valsSliced))
       return -EFAULT;
+    const len = valsSliced.length;
     remLen -= len;
     buf += len;
   }
@@ -539,7 +683,7 @@ export function __syscall_getrlimit(resource, rlim) {
   if (holder === null)
     return -EINVAL;
   if (!writeUlong(rlim, holder.cur) ||
-      !writeUlong(rlim += sizeofUong, holder.max))
+      !writeUlong(rlim += sizeofUlong, holder.max))
     return -EFAULT;
   return 0;
 }
@@ -549,12 +693,12 @@ export function __syscall_getrusage(who, ru) {
   switch (who) {
   case RUSAGE_SELF:
   case RUSAGE_THREAD:
-    if (!writeMem(ru, 0, sizeofRusage) ||
+    if (!writeFill(ru, 0, sizeofRusage) ||
         !writeLong(ru + 2 * sizeofTimeval, memory.getUsage()))
       return -EFAULT;
     return 0;
   case RUSAGE_CHILDREN:
-    if (!writeMem(ru, 0, sizeofRusage))
+    if (!writeFill(ru, 0, sizeofRusage))
       return -EFAULT;
     return 0;
   default:
@@ -583,8 +727,8 @@ export function __syscall_gettid() {
   return proc.pid;
 }
 
-export { fdNotSock as __syscall_getsockname }; // No sockets in minscripten
-export { fdNotSock as __syscall_getsockopt }; // No sockets in minscripten
+export { fdNotSock as __syscall_getsockname } // No sockets in minscripten
+export { fdNotSock as __syscall_getsockopt } // No sockets in minscripten
 
 export function __syscall_gettimeofday(tv, tz) {
   tv = toUlong(tv);
@@ -595,7 +739,7 @@ export function __syscall_gettimeofday(tv, tz) {
         !writeSusecondst(tv += sizeofTimet, (s % 1000) * 1000))
       return -EFAULT;
   }
-  if (tz !== NULL && !writeMem(tz, 0, 2*sizeofInt)) // Obsolete struct, not used
+  if (tz !== NULL && !writeFill(tz, 0, 2*sizeofInt)) // Obsolete struct, not used
     return -EFAULT;
   return 0;
 }
@@ -621,8 +765,8 @@ export function __syscall_kill(pid, sig) {
   return deliverSignal(sig);
 }
 
-export { eNosys as __syscall_nanosleep }; // No sleep in minscripten
-export { eNosys as __syscall_pause }; // No sleep in minscripten
+export { eNosys as __syscall_nanosleep } // No sleep in minscripten
+export { eNosys as __syscall_pause } // No sleep in minscripten
 
 export function __syscall_personality(persona) {
   persona = toUlong(persona);
@@ -666,8 +810,8 @@ export function __syscall_prlimit64(pid, resource, newLim, oldLim) {
   return 0;
 }
 
-export { ePerm as __syscall_reboot }; // Fails unless root
-export { ePerm as __syscall_setdomainname }; // Fails unless root
+export { ePerm as __syscall_reboot } // Fails unless root
+export { ePerm as __syscall_setdomainname } // Fails unless root
 
 export function __syscall_setfsgid(fsgid) {
   return fsgid === proc.gid ? fsgid : -EPERM;
@@ -679,8 +823,8 @@ export function __syscall_setgid(gid) {
   return gid === proc.gid ? 0 : -EPERM;
 }
 
-export { ePerm as __syscall_setgroups }; // Fails unless root
-export { ePerm as __syscall_sethostname }; // Fails unless root
+export { ePerm as __syscall_setgroups } // Fails unless root
+export { ePerm as __syscall_sethostname } // Fails unless root
 
 export function __syscall_setpgid(pid, pgid) {
   if (pid !== 0 && pid !== proc.pid)
@@ -705,7 +849,7 @@ export function __syscall_setpriority(which, who, nice) {
   nice = Math.min(Math.max(-20, nice), 19);
   const niceRlim = 20 - nice;
   if (nice < proc.nice && niceRlim > rlimits.nice.cur)
-    return -EACCESS;
+    return -EACCES;
   return 0;
 }
 
@@ -734,10 +878,10 @@ export function __syscall_setrlimit(resource, rlim) {
   if (holder === null)
     return -EINVAL;
   let newCur, newMax, result;
-  [newCur, result] = readUlong(newLim);
+  [newCur, result] = readUlong(rlim);
   if (!result)
     return -EFAULT;
-  [newMax, result] = readUlong(newLim += sizeofUlong);
+  [newMax, result] = readUlong(rlim += sizeofUlong);
   if (!result)
     return -EFAULT;
   if (newCur > newMax)
@@ -749,18 +893,18 @@ export function __syscall_setrlimit(resource, rlim) {
   return 0;
 }
 
-export { ePerm as __syscall_setsid() }; // We are already a session group leader
+export { ePerm as __syscall_setsid } // We are already a session group leader
 
-export { fdNotSock as __syscall_setsockopt }; // No sockets in minscripten
+export { fdNotSock as __syscall_setsockopt } // No sockets in minscripten
 
-export { ePerm as __syscall_settimeofday }; // Fails unless root
+export { ePerm as __syscall_settimeofday } // Fails unless root
 
 export function __syscall_setuid(uid) {
   return uid === proc.uid ? 0 : -EPERM;
 }
 
-export { fdNotSock as __syscall_shutdown }; // No sockets in minscripten
-export { eAfnosupport as __syscall_socket }; // No sockets in minscripten
+export { fdNotSock as __syscall_shutdown } // No sockets in minscripten
+export { eAfnosupport as __syscall_socket } // No sockets in minscripten
 
 export function __syscall_times(tms) {
   tms = toUlong(tms);
@@ -768,7 +912,7 @@ export function __syscall_times(tms) {
   // compile-time), that is *not* exposed via syscalls.  The Linux ABI specifies
   // that times() and other syscalls using clock_t shall tick at 100Hz.
   const USER_HZ = 100;
-  if (tms !== NULL && !writeMem(tms, 0, 4 * sizeofClockt))
+  if (tms !== NULL && !writeFill(tms, 0, 4 * sizeofClockt))
     return -EFAULT;
   return Date.now() / (1000 / USER_HZ);
 }
@@ -789,7 +933,7 @@ function tkill(tgid, tid, sig) {
   return deliverSignal(sig);
 }
 export function __syscall_tkill(tid, sig) {
-  if (pid <= 0)
+  if (tid <= 0)
     return -EINVAL;
   return tkill(0, tid, sig);
 }
@@ -825,12 +969,12 @@ export function __syscall_uname(uts) {
   return 0;
 }
 
-export { eNosys as __syscall_vfork }; // No multiprocess in minscripten
+export { eNosys as __syscall_vfork } // No multiprocess in minscripten
 
-export { ePerm as __syscall_vhangup }; // Fails unless root
+export { ePerm as __syscall_vhangup } // Fails unless root
 
-export { eNosys as __syscall_wait4 }; // No multiprocess/sleep in minscripten
-export { eNosys as __syscall_waitid }; // No multiprocess/sleep in minscripten
+export { eNosys as __syscall_wait4 } // No multiprocess/sleep in minscripten
+export { eNosys as __syscall_waitid } // No multiprocess/sleep in minscripten
 
 
 
@@ -842,242 +986,242 @@ export { eNosys as __syscall_waitid }; // No multiprocess/sleep in minscripten
 
 
 // Do these soonish:
-export { eNosys as __syscall_bind };
-export { eNosys as __syscall_connect };
-export { eNosys as __syscall_fcntl };
-export { eNosys as __syscall_fstat };
-export { eNosys as __syscall_ioctl };
-export { eNosys as __syscall_listen };
-export { eNosys as __syscall_lseek };
-export { eNosys as __syscall_open };
-export { eNosys as __syscall_poll };
-export { eNosys as __syscall_read };
-export { eNosys as __syscall_recvmmsg };
-export { eNosys as __syscall_recvmsg };
-export { eNosys as __syscall_readv };
-export { eNosys as __syscall_recvfrom };
-export { eNosys as __syscall_rt_sigprocmask };
-export { eNosys as __syscall_sendmmsg };
-export { eNosys as __syscall_sendmsg };
-export { eNosys as __syscall_sendto };
-export { eNosys as __syscall_stat };
-export { eNosys as __syscall_socketpair };
-export { eNosys as __syscall_writev };
-export { eNosys as __syscall_write };
+export { eNosys as __syscall_bind }
+export { eNosys as __syscall_connect }
+export { eNosys as __syscall_fcntl }
+export { eNosys as __syscall_fstat }
+export { eNosys as __syscall_ioctl }
+export { eNosys as __syscall_listen }
+export { eNosys as __syscall_lseek }
+export { eNosys as __syscall_open }
+export { eNosys as __syscall_poll }
+export { eNosys as __syscall_read }
+export { eNosys as __syscall_recvmmsg }
+export { eNosys as __syscall_recvmsg }
+export { eNosys as __syscall_readv }
+export { eNosys as __syscall_recvfrom }
+export { eNosys as __syscall_rt_sigprocmask }
+export { eNosys as __syscall_sendmmsg }
+export { eNosys as __syscall_sendmsg }
+export { eNosys as __syscall_sendto }
+export { eNosys as __syscall_stat }
+export { eNosys as __syscall_socketpair }
+export { eNosys as __syscall_writev }
+export { eNosys as __syscall_write }
 
 
 // I guess it would be nice to support pipes too with these:
 
-export { eNosys as __syscall_pipe2 };
-export { eNosys as __syscall_pipe };
-export { eNosys as __syscall_tee };
+export { eNosys as __syscall_pipe2 }
+export { eNosys as __syscall_pipe }
+export { eNosys as __syscall_tee }
 
 
 
 // Then these:
-export { eNosys as __syscall_access };
-export { eNosys as __syscall_acct };
-export { eNosys as __syscall_add_key };
-export { eNosys as __syscall_alarm };
-export { eNosys as __syscall_arch_prctl };
-export { eNosys as __syscall_bpf };
-export { eNosys as __syscall_capget };
-export { eNosys as __syscall_capset };
-export { eNosys as __syscall_chdir };
-export { eNosys as __syscall_chmod };
-export { eNosys as __syscall_chown };
-export { eNosys as __syscall_copy_file_range };
-export { eNosys as __syscall_creat };
-export { eNosys as __syscall_delete_module };
-export { eNosys as __syscall_epoll_create1 };
-export { eNosys as __syscall_epoll_create };
-export { eNosys as __syscall_epoll_ctl };
-export { eNosys as __syscall_epoll_pwait };
-export { eNosys as __syscall_epoll_wait };
-export { eNosys as __syscall_eventfd2 };
-export { eNosys as __syscall_eventfd };
-export { eNosys as __syscall_faccessat };
-export { eNosys as __syscall_fadvise64 };
-export { eNosys as __syscall_fallocate };
-export { eNosys as __syscall_fanotify_init };
-export { eNosys as __syscall_fanotify_mark };
-export { eNosys as __syscall_fchdir };
-export { eNosys as __syscall_fchmodat };
-export { eNosys as __syscall_fchmod };
-export { eNosys as __syscall_fchownat };
-export { eNosys as __syscall_fchown };
-export { eNosys as __syscall_fdatasync };
-export { eNosys as __syscall_fgetxattr };
-export { eNosys as __syscall_finit_module };
-export { eNosys as __syscall_flistxattr };
-export { eNosys as __syscall_flock };
-export { eNosys as __syscall_fremovexattr };
-export { eNosys as __syscall_fsetxattr };
-export { eNosys as __syscall_fstatfs };
-export { eNosys as __syscall_fsync };
-export { eNosys as __syscall_ftruncate };
-export { eNosys as __syscall_futimesat };
-export { eNosys as __syscall_getcwd };
-export { eNosys as __syscall_getdents64 };
-export { eNosys as __syscall_getdents };
-export { eNosys as __syscall_getitimer };
-export { eNosys as __syscall_get_mempolicy };
-export { eNosys as __syscall_get_robust_list };
-export { eNosys as __syscall_getxattr };
-export { eNosys as __syscall_init_module };
-export { eNosys as __syscall_inotify_add_watch };
-export { eNosys as __syscall_inotify_init1 };
-export { eNosys as __syscall_inotify_init };
-export { eNosys as __syscall_inotify_rm_watch };
-export { eNosys as __syscall_io_cancel };
-export { eNosys as __syscall_io_destroy };
-export { eNosys as __syscall_io_getevents };
-export { eNosys as __syscall_ioprio_get };
-export { eNosys as __syscall_ioprio_set };
-export { eNosys as __syscall_io_setup };
-export { eNosys as __syscall_io_submit };
-export { eNosys as __syscall_kcmp };
-export { eNosys as __syscall_kexec_file_load };
-export { eNosys as __syscall_kexec_load };
-export { eNosys as __syscall_keyctl };
-export { eNosys as __syscall_lchown };
-export { eNosys as __syscall_lgetxattr };
-export { eNosys as __syscall_linkat };
-export { eNosys as __syscall_link };
-export { eNosys as __syscall_listxattr };
-export { eNosys as __syscall_llistxattr };
-export { eNosys as __syscall_lookup_dcookie };
-export { eNosys as __syscall_lremovexattr };
-export { eNosys as __syscall_lsetxattr };
-export { eNosys as __syscall_lstat };
-export { eNosys as __syscall_mbind };
-export { eNosys as __syscall_membarrier };
-export { eNosys as __syscall_memfd_create };
-export { eNosys as __syscall_migrate_pages };
-export { eNosys as __syscall_mincore };
-export { eNosys as __syscall_mkdirat };
-export { eNosys as __syscall_mkdir };
-export { eNosys as __syscall_mknodat };
-export { eNosys as __syscall_mknod };
-export { eNosys as __syscall_mlock2 };
-export { eNosys as __syscall_mlockall };
-export { eNosys as __syscall_mlock };
-export { eNosys as __syscall_modify_ldt };
-export { eNosys as __syscall_mount };
-export { eNosys as __syscall_move_pages };
-export { eNosys as __syscall_mprotect };
-export { eNosys as __syscall_mq_getsetattr };
-export { eNosys as __syscall_mq_notify };
-export { eNosys as __syscall_mq_open };
-export { eNosys as __syscall_mq_timedreceive };
-export { eNosys as __syscall_mq_timedsend };
-export { eNosys as __syscall_mq_unlink };
-export { eNosys as __syscall_msgctl };
-export { eNosys as __syscall_msgget };
-export { eNosys as __syscall_msgrcv };
-export { eNosys as __syscall_msgsnd };
-export { eNosys as __syscall_msync };
-export { eNosys as __syscall_munlockall };
-export { eNosys as __syscall_munlock };
-export { eNosys as __syscall_name_to_handle_at };
-export { eNosys as __syscall_newfstatat };
-export { eNosys as __syscall_openat };
-export { eNosys as __syscall_open_by_handle_at };
-export { eNosys as __syscall_perf_event_open };
-export { eNosys as __syscall_pivot_root };
-export { eNosys as __syscall_ppoll };
-export { eNosys as __syscall_prctl };
-export { eNosys as __syscall_pread64 };
-export { eNosys as __syscall_preadv2 };
-export { eNosys as __syscall_preadv };
-export { eNosys as __syscall_process_vm_readv };
-export { eNosys as __syscall_process_vm_writev };
-export { eNosys as __syscall_pselect6 };
-export { eNosys as __syscall_ptrace };
-export { eNosys as __syscall_pwrite64 };
-export { eNosys as __syscall_pwritev2 };
-export { eNosys as __syscall_pwritev };
-export { eNosys as __syscall_quotactl };
-export { eNosys as __syscall_readahead };
-export { eNosys as __syscall_readlinkat };
-export { eNosys as __syscall_readlink };
-export { eNosys as __syscall_remap_file_pages };
-export { eNosys as __syscall_removexattr };
-export { eNosys as __syscall_renameat2 };
-export { eNosys as __syscall_renameat };
-export { eNosys as __syscall_rename };
-export { eNosys as __syscall_request_key };
-export { eNosys as __syscall_restart_syscall };
-export { eNosys as __syscall_rmdir };
-export { eNosys as __syscall_rt_sigaction };
-export { eNosys as __syscall_rt_sigpending };
-export { eNosys as __syscall_rt_sigqueueinfo };
-export { eNosys as __syscall_rt_sigreturn };
-export { eNosys as __syscall_rt_sigsuspend };
-export { eNosys as __syscall_rt_sigtimedwait };
-export { eNosys as __syscall_rt_tgsigqueueinfo };
-export { eNosys as __syscall_sched_getaffinity };
-export { eNosys as __syscall_sched_getattr };
-export { eNosys as __syscall_sched_getparam };
-export { eNosys as __syscall_sched_get_priority_max };
-export { eNosys as __syscall_sched_get_priority_min };
-export { eNosys as __syscall_sched_getscheduler };
-export { eNosys as __syscall_sched_rr_get_interval };
-export { eNosys as __syscall_sched_setaffinity };
-export { eNosys as __syscall_sched_setattr };
-export { eNosys as __syscall_sched_setparam };
-export { eNosys as __syscall_sched_setscheduler };
-export { eNosys as __syscall_sched_yield };
-export { eNosys as __syscall_seccomp };
-export { eNosys as __syscall_select };
-export { eNosys as __syscall_semctl };
-export { eNosys as __syscall_semget };
-export { eNosys as __syscall_semop };
-export { eNosys as __syscall_semtimedop };
-export { eNosys as __syscall_sendfile };
-export { eNosys as __syscall_setitimer };
-export { eNosys as __syscall_set_mempolicy };
-export { eNosys as __syscall_setns };
-export { eNosys as __syscall_set_robust_list };
-export { eNosys as __syscall_setxattr };
-export { eNosys as __syscall_shmat };
-export { eNosys as __syscall_shmctl };
-export { eNosys as __syscall_shmdt };
-export { eNosys as __syscall_shmget };
-export { eNosys as __syscall_sigaltstack };
-export { eNosys as __syscall_signalfd4 };
-export { eNosys as __syscall_signalfd };
-export { eNosys as __syscall_splice };
-export { eNosys as __syscall_statfs };
-export { eNosys as __syscall_swapoff };
-export { eNosys as __syscall_swapon };
-export { eNosys as __syscall_symlinkat };
-export { eNosys as __syscall_symlink };
-export { eNosys as __syscall_sync_file_range };
-export { eNosys as __syscall_syncfs };
-export { eNosys as __syscall_sync };
-export { eNosys as __syscall_sysfs };
-export { eNosys as __syscall_sysinfo };
-export { eNosys as __syscall_syslog };
-export { eNosys as __syscall_timer_create };
-export { eNosys as __syscall_timer_delete };
-export { eNosys as __syscall_timerfd_create };
-export { eNosys as __syscall_timerfd_gettime };
-export { eNosys as __syscall_timerfd_settime };
-export { eNosys as __syscall_timer_getoverrun };
-export { eNosys as __syscall_timer_gettime };
-export { eNosys as __syscall_timer_settime };
-export { eNosys as __syscall_truncate };
-export { eNosys as __syscall_umount2 };
-export { eNosys as __syscall_unlinkat };
-export { eNosys as __syscall_unlink };
-export { eNosys as __syscall_unshare };
-export { eNosys as __syscall_userfaultfd };
-export { eNosys as __syscall_ustat };
-export { eNosys as __syscall_utimensat };
-export { eNosys as __syscall_utimes };
-export { eNosys as __syscall_utime };
-export { eNosys as __syscall_vmsplice };
+export { eNosys as __syscall_access }
+export { eNosys as __syscall_acct }
+export { eNosys as __syscall_add_key }
+export { eNosys as __syscall_alarm }
+export { eNosys as __syscall_arch_prctl }
+export { eNosys as __syscall_bpf }
+export { eNosys as __syscall_capget }
+export { eNosys as __syscall_capset }
+export { eNosys as __syscall_chdir }
+export { eNosys as __syscall_chmod }
+export { eNosys as __syscall_chown }
+export { eNosys as __syscall_copy_file_range }
+export { eNosys as __syscall_creat }
+export { eNosys as __syscall_delete_module }
+export { eNosys as __syscall_epoll_create1 }
+export { eNosys as __syscall_epoll_create }
+export { eNosys as __syscall_epoll_ctl }
+export { eNosys as __syscall_epoll_pwait }
+export { eNosys as __syscall_epoll_wait }
+export { eNosys as __syscall_eventfd2 }
+export { eNosys as __syscall_eventfd }
+export { eNosys as __syscall_faccessat }
+export { eNosys as __syscall_fadvise64 }
+export { eNosys as __syscall_fallocate }
+export { eNosys as __syscall_fanotify_init }
+export { eNosys as __syscall_fanotify_mark }
+export { eNosys as __syscall_fchdir }
+export { eNosys as __syscall_fchmodat }
+export { eNosys as __syscall_fchmod }
+export { eNosys as __syscall_fchownat }
+export { eNosys as __syscall_fchown }
+export { eNosys as __syscall_fdatasync }
+export { eNosys as __syscall_fgetxattr }
+export { eNosys as __syscall_finit_module }
+export { eNosys as __syscall_flistxattr }
+export { eNosys as __syscall_flock }
+export { eNosys as __syscall_fremovexattr }
+export { eNosys as __syscall_fsetxattr }
+export { eNosys as __syscall_fstatfs }
+export { eNosys as __syscall_fsync }
+export { eNosys as __syscall_ftruncate }
+export { eNosys as __syscall_futimesat }
+export { eNosys as __syscall_getcwd }
+export { eNosys as __syscall_getdents64 }
+export { eNosys as __syscall_getdents }
+export { eNosys as __syscall_getitimer }
+export { eNosys as __syscall_get_mempolicy }
+export { eNosys as __syscall_get_robust_list }
+export { eNosys as __syscall_getxattr }
+export { eNosys as __syscall_init_module }
+export { eNosys as __syscall_inotify_add_watch }
+export { eNosys as __syscall_inotify_init1 }
+export { eNosys as __syscall_inotify_init }
+export { eNosys as __syscall_inotify_rm_watch }
+export { eNosys as __syscall_io_cancel }
+export { eNosys as __syscall_io_destroy }
+export { eNosys as __syscall_io_getevents }
+export { eNosys as __syscall_ioprio_get }
+export { eNosys as __syscall_ioprio_set }
+export { eNosys as __syscall_io_setup }
+export { eNosys as __syscall_io_submit }
+export { eNosys as __syscall_kcmp }
+export { eNosys as __syscall_kexec_file_load }
+export { eNosys as __syscall_kexec_load }
+export { eNosys as __syscall_keyctl }
+export { eNosys as __syscall_lchown }
+export { eNosys as __syscall_lgetxattr }
+export { eNosys as __syscall_linkat }
+export { eNosys as __syscall_link }
+export { eNosys as __syscall_listxattr }
+export { eNosys as __syscall_llistxattr }
+export { eNosys as __syscall_lookup_dcookie }
+export { eNosys as __syscall_lremovexattr }
+export { eNosys as __syscall_lsetxattr }
+export { eNosys as __syscall_lstat }
+export { eNosys as __syscall_mbind }
+export { eNosys as __syscall_membarrier }
+export { eNosys as __syscall_memfd_create }
+export { eNosys as __syscall_migrate_pages }
+export { eNosys as __syscall_mincore }
+export { eNosys as __syscall_mkdirat }
+export { eNosys as __syscall_mkdir }
+export { eNosys as __syscall_mknodat }
+export { eNosys as __syscall_mknod }
+export { eNosys as __syscall_mlock2 }
+export { eNosys as __syscall_mlockall }
+export { eNosys as __syscall_mlock }
+export { eNosys as __syscall_modify_ldt }
+export { eNosys as __syscall_mount }
+export { eNosys as __syscall_move_pages }
+export { eNosys as __syscall_mprotect }
+export { eNosys as __syscall_mq_getsetattr }
+export { eNosys as __syscall_mq_notify }
+export { eNosys as __syscall_mq_open }
+export { eNosys as __syscall_mq_timedreceive }
+export { eNosys as __syscall_mq_timedsend }
+export { eNosys as __syscall_mq_unlink }
+export { eNosys as __syscall_msgctl }
+export { eNosys as __syscall_msgget }
+export { eNosys as __syscall_msgrcv }
+export { eNosys as __syscall_msgsnd }
+export { eNosys as __syscall_msync }
+export { eNosys as __syscall_munlockall }
+export { eNosys as __syscall_munlock }
+export { eNosys as __syscall_name_to_handle_at }
+export { eNosys as __syscall_newfstatat }
+export { eNosys as __syscall_openat }
+export { eNosys as __syscall_open_by_handle_at }
+export { eNosys as __syscall_perf_event_open }
+export { eNosys as __syscall_pivot_root }
+export { eNosys as __syscall_ppoll }
+export { eNosys as __syscall_prctl }
+export { eNosys as __syscall_pread64 }
+export { eNosys as __syscall_preadv2 }
+export { eNosys as __syscall_preadv }
+export { eNosys as __syscall_process_vm_readv }
+export { eNosys as __syscall_process_vm_writev }
+export { eNosys as __syscall_pselect6 }
+export { eNosys as __syscall_ptrace }
+export { eNosys as __syscall_pwrite64 }
+export { eNosys as __syscall_pwritev2 }
+export { eNosys as __syscall_pwritev }
+export { eNosys as __syscall_quotactl }
+export { eNosys as __syscall_readahead }
+export { eNosys as __syscall_readlinkat }
+export { eNosys as __syscall_readlink }
+export { eNosys as __syscall_remap_file_pages }
+export { eNosys as __syscall_removexattr }
+export { eNosys as __syscall_renameat2 }
+export { eNosys as __syscall_renameat }
+export { eNosys as __syscall_rename }
+export { eNosys as __syscall_request_key }
+export { eNosys as __syscall_restart_syscall }
+export { eNosys as __syscall_rmdir }
+export { eNosys as __syscall_rt_sigaction }
+export { eNosys as __syscall_rt_sigpending }
+export { eNosys as __syscall_rt_sigqueueinfo }
+export { eNosys as __syscall_rt_sigreturn }
+export { eNosys as __syscall_rt_sigsuspend }
+export { eNosys as __syscall_rt_sigtimedwait }
+export { eNosys as __syscall_rt_tgsigqueueinfo }
+export { eNosys as __syscall_sched_getaffinity }
+export { eNosys as __syscall_sched_getattr }
+export { eNosys as __syscall_sched_getparam }
+export { eNosys as __syscall_sched_get_priority_max }
+export { eNosys as __syscall_sched_get_priority_min }
+export { eNosys as __syscall_sched_getscheduler }
+export { eNosys as __syscall_sched_rr_get_interval }
+export { eNosys as __syscall_sched_setaffinity }
+export { eNosys as __syscall_sched_setattr }
+export { eNosys as __syscall_sched_setparam }
+export { eNosys as __syscall_sched_setscheduler }
+export { eNosys as __syscall_sched_yield }
+export { eNosys as __syscall_seccomp }
+export { eNosys as __syscall_select }
+export { eNosys as __syscall_semctl }
+export { eNosys as __syscall_semget }
+export { eNosys as __syscall_semop }
+export { eNosys as __syscall_semtimedop }
+export { eNosys as __syscall_sendfile }
+export { eNosys as __syscall_setitimer }
+export { eNosys as __syscall_set_mempolicy }
+export { eNosys as __syscall_setns }
+export { eNosys as __syscall_set_robust_list }
+export { eNosys as __syscall_setxattr }
+export { eNosys as __syscall_shmat }
+export { eNosys as __syscall_shmctl }
+export { eNosys as __syscall_shmdt }
+export { eNosys as __syscall_shmget }
+export { eNosys as __syscall_sigaltstack }
+export { eNosys as __syscall_signalfd4 }
+export { eNosys as __syscall_signalfd }
+export { eNosys as __syscall_splice }
+export { eNosys as __syscall_statfs }
+export { eNosys as __syscall_swapoff }
+export { eNosys as __syscall_swapon }
+export { eNosys as __syscall_symlinkat }
+export { eNosys as __syscall_symlink }
+export { eNosys as __syscall_sync_file_range }
+export { eNosys as __syscall_syncfs }
+export { eNosys as __syscall_sync }
+export { eNosys as __syscall_sysfs }
+export { eNosys as __syscall_sysinfo }
+export { eNosys as __syscall_syslog }
+export { eNosys as __syscall_timer_create }
+export { eNosys as __syscall_timer_delete }
+export { eNosys as __syscall_timerfd_create }
+export { eNosys as __syscall_timerfd_gettime }
+export { eNosys as __syscall_timerfd_settime }
+export { eNosys as __syscall_timer_getoverrun }
+export { eNosys as __syscall_timer_gettime }
+export { eNosys as __syscall_timer_settime }
+export { eNosys as __syscall_truncate }
+export { eNosys as __syscall_umount2 }
+export { eNosys as __syscall_unlinkat }
+export { eNosys as __syscall_unlink }
+export { eNosys as __syscall_unshare }
+export { eNosys as __syscall_userfaultfd }
+export { eNosys as __syscall_ustat }
+export { eNosys as __syscall_utimensat }
+export { eNosys as __syscall_utimes }
+export { eNosys as __syscall_utime }
+export { eNosys as __syscall_vmsplice }
 
 // Totally unimplemented, even upstream:
 /*
