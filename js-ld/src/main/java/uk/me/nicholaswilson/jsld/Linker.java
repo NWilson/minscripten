@@ -181,6 +181,41 @@ public class Linker {
 
   private Set<String> loadExterns() {
     Set<String> externs = new HashSet<>();
+
+    // Pre-add bits that our wrappers use; users shouldn't have to declare
+    // these.  Please *only* add things that are available in all engines (ie
+    // both browsers and node.js) - anything else should ideally be loaded
+    // dynamically from window/global.
+
+    // Globals, guaranteed to be available everywhere since they're spec'ed as
+    // globals.
+    externs.add("Array");
+    externs.add("Date");
+    externs.add("Error");
+    externs.add("Int8Array");
+    externs.add("Int32Array");
+    externs.add("Math");
+    externs.add("Number");
+    externs.add("Object");
+    externs.add("Promise");
+    externs.add("RangeError");
+    externs.add("TypeError");
+    externs.add("Uint8Array");
+    externs.add("Uint32Array");
+    externs.add("undefined");
+    externs.add("WebAssembly");
+
+    // Available in node.js - and most crucially, not available any other way
+    // than as an unqualified reference (can't use 'this' for global, or
+    // 'global.require/module' for require/module).
+    externs.add("require");
+    externs.add("module");
+    externs.add("__dirname");
+    externs.add("global"); // TODO get rid of this if node.js ever adds "self"
+
+    // Available in browsers, to refer to the window or web worker context.
+    externs.add("self");
+
     externsFilePaths.stream()
       .map(ExternsFile::new)
       .map(ExternsFile::getDeclarations)

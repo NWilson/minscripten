@@ -5,7 +5,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import com.shapesecurity.functional.data.ImmutableList;
 import com.shapesecurity.functional.data.Maybe;
@@ -25,7 +24,7 @@ class ModuleGenerator {
   // an absolute minimum any pollution of the namespace that modules are nested
   // inside, and use underscores for those symbols to make sure.
   public static final String ROOT_VAR = "__root";
-  public static final String CURRENT_SCRIPT_VAR = "__currentScript";
+  public static final String FETCHER_VAR = "__fetcher";
   public static final String EXPORTS_VAR = "__exports";
   public static final String SYMBOLS_VAR = "__symbols";
 
@@ -87,7 +86,7 @@ class ModuleGenerator {
   private void generatePreamble() {
     ModuleUtil.appendFragment(
       scriptStatements,
-      "const " + EXPORTS_VAR + " = {};\n" +
+      "const " + EXPORTS_VAR + " = {};" +
         "const " + SYMBOLS_VAR + " = {};"
     );
   }
@@ -108,35 +107,10 @@ class ModuleGenerator {
     // Construct an expression that will calculate the file path for the WASM
     // module, relative to the current scriptStatements, and using the filename it has
     // on disk right now.
-    //  -> new URL("<WASM_FILENAME>", __currentScript.src).toString()
     String wasmFileName = wasmFile.getPath().getFileName().toString();
-    CallExpression wasmUrlExpression = new CallExpression(
-      new StaticMemberExpression(
-        "toString",
-        new NewExpression(
-          new IdentifierExpression("URL"),
-          ImmutableList.of(
-            new LiteralStringExpression(wasmFileName),
-            new StaticMemberExpression(
-              "src",
-              new IdentifierExpression(CURRENT_SCRIPT_VAR)
-            )
-          )
-        )
-      ),
-      ImmutableList.empty()
-    );
-
     CallExpression ce = new CallExpression(
-      new IdentifierExpression("fetch"),
-      ImmutableList.of(wasmUrlExpression)
-    );
-
-    ce = new CallExpression(
-      new StaticMemberExpression("then", ce),
-      ImmutableList.of(ModuleUtil.parseFragmentExpression(
-        "function(response) { return response.arrayBuffer(); }"
-      ))
+      new IdentifierExpression(FETCHER_VAR),
+      ImmutableList.of(new LiteralStringExpression(wasmFileName))
     );
 
     ce = new CallExpression(
@@ -153,12 +127,25 @@ class ModuleGenerator {
 
     String wasmInstanceVar = "wasmInstance";
     String exportsVar = "es";
+    String wrapperFunctionVar = "wrapExport";
     List<Statement> wasmInstanceStatements = new ArrayList<>();
     ModuleUtil.appendFragment(
       wasmInstanceStatements,
-      "const " + exportsVar + " = " + wasmInstanceVar + ".exports;"
+      "const es = wasmInstance.exports;" +
+        "let wasmEx;" +
+        "function wrapExport(name) {" +
+        "  const fn = es[name];" +
+        "  return function(...args) {" +
+        // Should not re-enter WebAssembly after something fails within!
+        "    if (wasmEx !== undefined)" +
+        "      throw new Error('WebAssembly previously threw: ' + wasmEx);" +
+        "    try { return fn(...args); } catch (e) {" +
+        "      wasmEx = e; throw e;" +
+        "    }" +
+        "  }" +
+        "}"
     );
-    wasmFile.appendExports(wasmInstanceStatements, exportsVar);
+    wasmFile.appendExports(wasmInstanceStatements, wrapperFunctionVar);
     if (wasmFile.getNeedsExternalCallCtors()) {
       wasmInstanceStatements.add(new ExpressionStatement(
         new CallExpression(
@@ -271,127 +258,163 @@ class ModuleGenerator {
   private void generateWrapper() {
     List<ImportSpecifier> imports = RequirementsTable.INSTANCE.getImports();
 
-    String rootVar = "root";
     String factoryVar = "factory";
 
-    FunctionBody amdFunctionBody = new FunctionBody(
-      ImmutableList.empty(),
-      ImmutableList.of(
-        ModuleUtil.parseFragmentStatement("const define = root.define;"),
-        new IfStatement(
-          ModuleUtil.parseFragmentExpression(
-            "typeof define === 'function' && define.amd"
-          ),
-          new ExpressionStatement(
-            // define("<OUTPUT_NAME>", ["IMPORTS_FROM"], factory);
-            new CallExpression(
-              new IdentifierExpression("define"),
-              ImmutableList.of(
-                new LiteralStringExpression(moduleName),
-                new ArrayExpression(
-                  ImmutableList.from(
-                    imports.stream()
-                      .map(i -> i.name.orJust(i.binding.name))
-                      .map(i ->
-                        (SpreadElementExpression)new LiteralStringExpression(i))
-                      .map(Maybe::of)
-                      .collect(Collectors.toList())
-                  )
-                ),
-                new IdentifierExpression(factoryVar)
-              )
+    List<Statement> umdFunctionBody = new ArrayList<>();
+    ModuleUtil.appendFragment(
+      umdFunctionBody,
+      "let root, isNode = false;" +
+        "if (typeof global === 'object' && " +
+        "    global.toString() == '[object global]') {" +
+        "  root = global; isNode = true;" +
+        "} else if (typeof self === 'object' && self.Object !== undefined && " +
+        "           self.Array !== undefined) {" +
+        "  root = self;" +
+        "} else throw new Error('Unable to detect global object');" +
+        "const define = root.define;" +
+        // Bind in all the bits that depend on document.currentScript, which
+        // we have to capture *now*, rather than asynchronously inside the
+        // module-factory itself.
+        "const currentScript = isNode ? __dirname " +
+        "                             : root.document.currentScript.src;" +
+        "const fetcher = isNode ? function(name) {" +
+        "  const fs = require('fs'), path = require('path');" +
+        "  const buf = fs.readFileSync(path.join(currentScript, name));" +
+        // Cargo-culting, apparently Node buffers can be re-used in a pool...
+        "  const copy = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);\n" +
+        "  return Promise.resolve(copy);" +
+        "} : function(name) {" +
+        "  const url = new root.URL(name,currentScript);" +
+        "  return root.fetch(url.toString()).then(function(response) {" +
+        "    return response.arrayBuffer();" +
+        "  });" +
+        "};" +
+        "factory = factory.bind(null, root, fetcher);"
+    );
+    Statement umdAmdBranch = new ExpressionStatement(
+      // define("<OUTPUT_NAME>", ["IMPORTS_FROM"], factory);
+      new CallExpression(
+        new IdentifierExpression("define"),
+        ImmutableList.of(
+          new LiteralStringExpression(moduleName),
+          new ArrayExpression(
+            ImmutableList.from(
+              imports.stream()
+                .map(i -> i.name.orJust(i.binding.name))
+                .map(i ->
+                  (SpreadElementExpression)new LiteralStringExpression(i))
+                .map(Maybe::of)
+                .collect(Collectors.toList())
             )
           ),
-          Maybe.of(new ExpressionStatement(
-            // root["<OUTPUT_NAME>"] = factory(root["<IMPORTS_FROM>"]);
-            new AssignmentExpression(
-              new ComputedMemberExpression(
-                new LiteralStringExpression(moduleName),
-                new IdentifierExpression(rootVar)
-              ),
-              new CallExpression(
-                new IdentifierExpression(factoryVar),
-                ImmutableList.from(
-                  imports.stream()
-                    .map(i -> i.name.orJust(i.binding.name))
-                    .map(i -> new ComputedMemberExpression(
-                      new LiteralStringExpression(i),
-                      new IdentifierExpression(rootVar)
-                    ))
-                    .collect(Collectors.toList())
-                )
-              )
-            )
-          ))
+          new IdentifierExpression(factoryVar)
         )
       )
     );
-
-    // (function(__root, __currentScript, IMPORTS_AS) {
-    //   <BODY>
-    // }).bind(null, this, document.currentScript)
-    Expression factoryExpression = new CallExpression(
-      new StaticMemberExpression(
-        "bind",
-        new FunctionExpression(
-          Maybe.empty(),
-          false,
-          new FormalParameters(
-            ImmutableList.cons(
-              new BindingIdentifier(ROOT_VAR),
-              ImmutableList.cons(
-                new BindingIdentifier(CURRENT_SCRIPT_VAR),
-                ImmutableList.from(
-                  imports.stream()
-                    .map(i -> i.binding.name)
-                    .map(BindingIdentifier::new)
-                    .collect(Collectors.toList())
-                )
-              )
+    Statement umdNodeBranch = new ExpressionStatement(
+      new AssignmentExpression(
+        new StaticMemberExpression(
+          "exports",
+          new IdentifierExpression("module")
+        ),
+        new CallExpression(
+          new IdentifierExpression("factory"),
+          ImmutableList.from(
+            imports.stream()
+              .map(i -> i.name.orJust(i.binding.name))
+              .map(i -> new CallExpression(
+                new IdentifierExpression("require"),
+                ImmutableList.of(new LiteralStringExpression(i))
+              ))
+              .collect(Collectors.toList())
+          )
+        )
+      )
+    );
+    Statement umdFallbackBranch = new ExpressionStatement(
+      // root["<OUTPUT_NAME>"] = factory(root["<IMPORTS_FROM>"]);
+      new AssignmentExpression(
+        new ComputedMemberExpression(
+          new LiteralStringExpression(moduleName),
+          new IdentifierExpression("root")
+        ),
+        new CallExpression(
+          new IdentifierExpression(factoryVar),
+          ImmutableList.from(
+            imports.stream()
+              .map(i -> i.name.orJust(i.binding.name))
+              .map(i -> new ComputedMemberExpression(
+                new LiteralStringExpression(i),
+                new IdentifierExpression("root")
+              ))
+              .collect(Collectors.toList())
+          )
+        )
+      )
+    );
+    umdFunctionBody.add(
+      new IfStatement(
+        ModuleUtil.parseFragmentExpression(
+          "typeof define === 'function' && define.amd"
+        ),
+        umdAmdBranch,
+        Maybe.of(
+          new IfStatement(
+            ModuleUtil.parseFragmentExpression(
+              "typeof module === 'object' && module.exports"
             ),
-            Maybe.empty()
-          ),
-          new FunctionBody(
-            ImmutableList.empty(),
-            ImmutableList.from(scriptStatements)
-          )
-        )
-      ),
-      ImmutableList.cons(
-        new LiteralNullExpression(),
-        ImmutableList.cons(
-          new ThisExpression(),
-          ImmutableList.of(
-            new StaticMemberExpression(
-              "currentScript",
-              new IdentifierExpression("document")
-            )
+            umdNodeBranch,
+            Maybe.of(umdFallbackBranch)
           )
         )
       )
     );
 
-    // (function(root, factory) { <AMD_FUNCTION_BODY> })(this, <FACTORY>)
-    CallExpression amdRunner = new CallExpression(
+    // function(__root, __fetcher, IMPORTS_AS) {
+    //   <BODY>
+    // }
+    Expression factoryExpression = new FunctionExpression(
+      Maybe.empty(),
+      false,
+      new FormalParameters(
+        ImmutableList.cons(
+          new BindingIdentifier(ROOT_VAR),
+          ImmutableList.cons(
+            new BindingIdentifier(FETCHER_VAR),
+            ImmutableList.from(
+              imports.stream()
+                .map(i -> i.binding.name)
+                .map(BindingIdentifier::new)
+                .collect(Collectors.toList())
+            )
+          )
+        ),
+        Maybe.empty()
+      ),
+      new FunctionBody(
+        ImmutableList.empty(),
+        ImmutableList.from(scriptStatements)
+      )
+    );
+
+    // (function(factory) { <UMD_FUNCTION_BODY> })(<FACTORY>)
+    CallExpression umdRunner = new CallExpression(
       new FunctionExpression(
         Maybe.empty(),
         false,
         new FormalParameters(
-          ImmutableList.of(
-            new BindingIdentifier(rootVar),
-            new BindingIdentifier(factoryVar)
-          ),
+          ImmutableList.of(new BindingIdentifier(factoryVar)),
           Maybe.empty()
         ),
-        amdFunctionBody
+        new FunctionBody(
+          ImmutableList.empty(),
+          ImmutableList.from(umdFunctionBody)
+        )
       ),
-      ImmutableList.of(
-        new ThisExpression(),
-        factoryExpression
-      )
+      ImmutableList.of(factoryExpression)
     );
 
-    scriptStatements = Collections.singletonList(new ExpressionStatement(amdRunner));
+    scriptStatements = Collections.singletonList(new ExpressionStatement(umdRunner));
   }
 
   private Script generateScript() {

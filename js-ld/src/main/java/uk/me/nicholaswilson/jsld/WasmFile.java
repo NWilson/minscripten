@@ -139,22 +139,22 @@ class WasmFile {
 
   public void appendExports(
     List<Statement> statements,
-    String exportsName
+    String wrapperFunctionVar
   ) {
     SymbolTable symbolTable = SymbolTable.INSTANCE;
     for (ExportEntry ee : exports) {
       if (symbolTable.getSymbol(ee.name).isUnused())
         continue;
-      // __symbols['<EXPORTED_NAME>'] = exports['<EXPORTED_NAME>']
+      // __symbols['<EXPORTED_NAME>'] = wrapExport('<EXPORTED_NAME>')
       statements.add(new ExpressionStatement(
         new AssignmentExpression(
           new ComputedMemberExpression(
             new LiteralStringExpression(ee.name),
             new IdentifierExpression(ModuleGenerator.SYMBOLS_VAR)
           ),
-          new ComputedMemberExpression(
-            new LiteralStringExpression(ee.name),
-            new IdentifierExpression(exportsName)
+          new CallExpression(
+            new IdentifierExpression(wrapperFunctionVar),
+            ImmutableList.of(new LiteralStringExpression(ee.name))
           )
         )
       ));
