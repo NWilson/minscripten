@@ -9,9 +9,9 @@ import { wasm_add_one as wasm_add_one_budged } from '__symbols';
 function getAddedBudged() {
   return wasm_add_one_budged();
 }
-export { getAddedBudged as getAdded };
+export { getAddedBudged as getAdded }
 
 // Sample usage of functions from an external library: just import what you
 // want from it, then you can export or use it.
-import { isArray as isArrayBudged } from 'jQuery';
-export { isArrayBudged as isArrayExport };
+import { isArray as isArrayBudged } from 'externalLib';
+export { isArrayBudged as isArrayExport }
