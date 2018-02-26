@@ -145,7 +145,11 @@ class ModuleGenerator {
         "  }" +
         "}"
     );
-    wasmFile.appendExports(wasmInstanceStatements, wrapperFunctionVar);
+    wasmFile.appendExports(
+      wasmInstanceStatements,
+      exportsVar,
+      wrapperFunctionVar
+    );
     if (wasmFile.getNeedsExternalCallCtors()) {
       wasmInstanceStatements.add(new ExpressionStatement(
         new CallExpression(

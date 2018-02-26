@@ -139,6 +139,7 @@ class WasmFile {
 
   public void appendExports(
     List<Statement> statements,
+    String exportsVar,
     String wrapperFunctionVar
   ) {
     SymbolTable symbolTable = SymbolTable.INSTANCE;
@@ -152,10 +153,15 @@ class WasmFile {
             new LiteralStringExpression(ee.name),
             new IdentifierExpression(ModuleGenerator.SYMBOLS_VAR)
           ),
-          new CallExpression(
-            new IdentifierExpression(wrapperFunctionVar),
-            ImmutableList.of(new LiteralStringExpression(ee.name))
-          )
+          ee.objectDescriptor.type == WasmObjectType.FUNCTION
+            ? new CallExpression(
+              new IdentifierExpression(wrapperFunctionVar),
+              ImmutableList.of(new LiteralStringExpression(ee.name))
+            )
+            : new ComputedMemberExpression(
+              new LiteralStringExpression(ee.name),
+              new IdentifierExpression(exportsVar)
+            )
         )
       ));
     }
