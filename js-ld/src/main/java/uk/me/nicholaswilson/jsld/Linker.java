@@ -14,8 +14,6 @@ import java.util.stream.Collectors;
 
 import com.shapesecurity.shift.ast.Script;
 import com.shapesecurity.shift.codegen.PrettyCodeGen;
-import com.shapesecurity.shift.scope.GlobalScope;
-import com.shapesecurity.shift.scope.ScopeAnalyzer;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -189,23 +187,16 @@ public class Linker {
 
     // Globals, guaranteed to be available everywhere since they're spec'ed as
     // globals.
-    externs.add("Array");
-    externs.add("Date");
-    externs.add("Error");
-    externs.add("Int8Array");
-    externs.add("Int32Array");
-    externs.add("Math");
-    externs.add("Number");
-    externs.add("Object");
-    externs.add("Promise");
-    externs.add("Proxy");
-    externs.add("RangeError");
-    externs.add("Reflect");
-    externs.add("TypeError");
-    externs.add("Uint8Array");
-    externs.add("Uint32Array");
-    externs.add("undefined");
-    externs.add("WebAssembly");
+    for (String s : Arrays.asList(
+        "Array", "ArrayBuffer", "Boolean", "DataView", "Date", "Error",
+        "EvalError", "Float32Array", "Float64Array", "Function", "Generator",
+        "GeneratorFunction", "Infinity", "InternalError", "Int8Array",
+        "Int16Array", "Int32Array", "Intl", "Map", "Math", "NaN", "Number",
+        "Object", "Promise", "Proxy", "RangeError", "ReferenceError", "Reflect",
+        "RegExp", "Set", "String", "Symbol", "SyntaxError", "TypeError",
+        "Uint8Array", "Uint8ClampedArray", "Uint16Array", "Uint32Array",
+        "undefined", "WeakMap", "WeakSet", "WebAssembly"))
+      externs.add(s);
 
     // Available in node.js - and most crucially, not available any other way
     // than as an unqualified reference (can't use 'this' for global, or
