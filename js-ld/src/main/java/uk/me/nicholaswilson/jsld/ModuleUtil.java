@@ -241,51 +241,20 @@ class ModuleUtil {
 
   public static Expression generateLateBinding(
     BindingIdentifier rebindVar,
-    Expression bindingExpression
+    Expression bindingExpression,
+    boolean isCallable
   ) {
-    String argsVar = "args";
-    String lateBindingVar = "lateBinding";
-    // function(...args) { <BODY> }
-    return new FunctionExpression(
-      Maybe.empty(),
-      false,
-      new FormalParameters(
-        ImmutableList.empty(),
-        Maybe.of(new BindingIdentifier(argsVar))
-      ),
-      new FunctionBody(
-        ImmutableList.empty(),
-        ImmutableList.of(
-          // const lateBinding = (rebindVar = bindingExpression);
-          new VariableDeclarationStatement(
-            new VariableDeclaration(
-              VariableDeclarationKind.Const,
-              ImmutableList.of(
-                new VariableDeclarator(
-                  new BindingIdentifier(lateBindingVar),
-                  Maybe.of(
-                    new AssignmentExpression(rebindVar, bindingExpression)
-                  )
-                )
-              )
-            )
-          ),
-          // return lateBinding.call(this, ...args);
-          new ReturnStatement(
-            Maybe.of(
-              new CallExpression(
-                new StaticMemberExpression(
-                  "call",
-                  new IdentifierExpression(lateBindingVar)
-                ),
-                ImmutableList.of(
-                  new ThisExpression(),
-                  new SpreadElement(new IdentifierExpression(argsVar))
-                )
-              )
-            )
+    return new CallExpression(
+      new IdentifierExpression(ModuleGenerator.LATE_BINDER_VAR),
+      ImmutableList.of(
+        new ArrowExpression(
+          new FormalParameters(ImmutableList.empty(), Maybe.empty()),
+          new AssignmentExpression(
+            rebindVar,
+            bindingExpression
           )
-        )
+        ),
+        new LiteralBooleanExpression(isCallable)
       )
     );
   }

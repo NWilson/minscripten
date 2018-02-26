@@ -198,7 +198,9 @@ public class Linker {
     externs.add("Number");
     externs.add("Object");
     externs.add("Promise");
+    externs.add("Proxy");
     externs.add("RangeError");
+    externs.add("Reflect");
     externs.add("TypeError");
     externs.add("Uint8Array");
     externs.add("Uint32Array");

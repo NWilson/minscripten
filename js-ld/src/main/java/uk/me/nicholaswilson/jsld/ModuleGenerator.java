@@ -15,6 +15,7 @@ import com.shapesecurity.shift.scope.ScopeAnalyzer;
 import com.shapesecurity.shift.scope.Variable;
 import uk.me.nicholaswilson.jsld.SymbolTable.MemoryDefinition;
 import uk.me.nicholaswilson.jsld.wasm.WasmLimits;
+import uk.me.nicholaswilson.jsld.wasm.WasmObjectType;
 
 class ModuleGenerator {
 
@@ -28,6 +29,7 @@ class ModuleGenerator {
   public static final String FETCHER_VAR = mungeSymbol("__fetcher");
   public static final String EXPORTS_VAR = dontMungeSymbol("__exports");
   public static final String SYMBOLS_VAR = mungeSymbol("__symbols");
+  public static final String LATE_BINDER_VAR = mungeSymbol("__lateBind");
 
   private List<Statement> scriptStatements = new ArrayList<>();
   private final List<SymbolsFile> symbolsFiles;
@@ -89,6 +91,39 @@ class ModuleGenerator {
       scriptStatements,
       "const " + EXPORTS_VAR + " = {};" +
         "const " + SYMBOLS_VAR + " = {};"
+    );
+
+    // Hah, this needs some explanation!  Modules in general have circular
+    // dependencies (eg. Wasm has to import some symbols from JS, and JS has to
+    // import from Wasm).  Modules could also import symbols from each other in
+    // a loop - which is completely fine, we just have to bind the symbols in
+    // one pass, before any of them are actually used.  To break the circle, I'm
+    // using a fancy trick with Proxy objects.  The idea is to use a proxy as
+    // the initial value for imported symbols, and rebind the variable to the
+    // correct definition after all modules have provided their exports!  We do
+    // this using the __lateBind helper, which builds the proxy.  It should take
+    // a binder function, which lazily looks up the symbol (and as a cute
+    // optimisation, rebinds the symbol too so the proxy is only used for the
+    // initial call!).
+    ModuleUtil.appendFragment(
+      scriptStatements,
+      "function " + LATE_BINDER_VAR + "(binder, isCallable) {" +
+        // The fakeTarget won't ever by used for anything; it's replaced by the
+        // real target below.  However, bizarrely and sadly, we can't just use
+        // "{}" as the fake target - it needs to be a callable since the proxy's
+        // IsCallable slot immutably copies the value of the target, rather than
+        // allowing it to be forwarded via a proxy operation :(
+        "  const fakeTarget = isCallable ? (function(){}) : {};" +
+        "  const reflectingHandler = new Proxy({}, {" +
+        "    get(reflectingTarget_, prop, reflectingHandler_) {" +
+        "      return function(fakeTarget_, ...args) {" +
+        "        const realTarget = binder();" +
+        "        return Reflect[prop](realTarget, ...args);" +
+        "      };" +
+        "    }" +
+        "  });" +
+        "  return new Proxy(fakeTarget, reflectingHandler);" +
+        "}"
     );
   }
 
@@ -486,20 +521,22 @@ class ModuleGenerator {
       ));
     }
     for (ImportSpecifier is : symbolImports) {
-      // <NAME> = function(...args) { late-bind '<IMPORTED_NAME>' to name }
+      String symbolName = is.name.orJust(is.binding.name);
+      SymbolTable.Symbol symbol = SymbolTable.INSTANCE.getSymbol(symbolName);
+      boolean isCallable = symbol.getDescriptor() == null ||
+        symbol.getDescriptor().type == WasmObjectType.FUNCTION;
+
+      // <NAME> = __lateBind(() => (<NAME> = <IMPORTED_NAME>))
       statementsOut.add(new ExpressionStatement(
         new AssignmentExpression(
           new BindingIdentifier(is.binding.name),
           ModuleUtil.generateLateBinding(
             new BindingIdentifier(is.binding.name),
             new ComputedMemberExpression(
-              new LiteralStringExpression(
-                is.name.orJust(is.binding.name)
-              ),
-              new IdentifierExpression(
-                ModuleGenerator.SYMBOLS_VAR
-              )
-            )
+              new LiteralStringExpression(symbolName),
+              new IdentifierExpression(ModuleGenerator.SYMBOLS_VAR)
+            ),
+            isCallable
           )
         )
       ));
