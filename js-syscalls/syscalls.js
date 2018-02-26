@@ -147,7 +147,7 @@ const Buffer = isNodeJs ? __root.Buffer : class Buffer extends Uint8Array {
         return 0xfffd; // replace out-of-range / surrogate code points
       const minimalBytes = (u < 0x80) ? 1 : (u < 0x800) ? 2 : (u < 0x10000) ? 3 : 4;
       if (trailBytes + 1 != minimalBytes)
-        replace 0xfffd; // replace non-minimally-encoded
+        return 0xfffd; // replace non-minimally-encoded
       return u;
     }
     while (i < end)
@@ -409,7 +409,7 @@ const fds = new class extends Array {
   constructor() {
     super();
 
-    const console = __root.console;
+    const console = __root.console; // Global in browsers and node.js
     const initialFile = console !== undefined ? new Console(console)
                                               : new NullDevice();
     for (let i = 0; i < 3; ++i)
@@ -695,16 +695,27 @@ export function __syscall_getpriority(which, who) {
   return 20 - proc.nice;
 }
 
+let getRandom;
+if (isNodeJs) {
+  getRandom = require('crypto').randomFillSync;
+} else {
+  const crypto = __root.crypto;
+  getRandom = crypto === undefined ? undefined : crypto.getRandomValues;
+}
+
 export function __syscall_getrandom(buf, bufLen, flags) {
   bufLen = toUlong(bufLen);
   if ((flags & ~(GRND_NONBLOCK | GRND_RANDOM)) !== 0)
     return -EINVAL;
+  // If the caller doesn't check the return code, there could be a security
+  // meltdown.  Better to throw here than return!
+  if (getRandom === undefined)
+    throw new Error("No random source found"); // return -ENOSYS;
   const vals = new Uint8Array(256);
-  const crypto = __root.crypto;
   let remLen = bufLen;
   while (remLen > 0) {
     const valsSliced = remLen >= vals.length ? vals : vals.slice(0, remLen);
-    crypto.getRandomValues(valsSliced);
+    getRandom(vals);
     if (!writeUint8Array(buf, valsSliced))
       return -EFAULT;
     const len = valsSliced.length;
