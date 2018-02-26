@@ -123,8 +123,9 @@ const Buffer = isNodeJs ? __root.Buffer : class Buffer extends Uint8Array {
     // Can't have multiple out-values in JS, so we decode with a closure, which
     // should be inlined.
     let i = offset;
+    const buffer = this;
     function readCodePoint() {
-      let u = this[i++];
+      let u = buffer[i++];
       if (u < 0x80) return u; // ASCII, nothing to do
       if (u >= 0xf8 || u < 0xc0)
         return 0xfffd; // replace bad lead byte
@@ -139,7 +140,7 @@ const Buffer = isNodeJs ? __root.Buffer : class Buffer extends Uint8Array {
       }
       let j = i; i = cpEnd;
       while (j < cpEnd) {
-        const u2 = this[j++];
+        const u2 = buffer[j++];
         if (u2 >= 0xc0) return 0xfffd; // replace bad trail byte
         u = (u << 6) | (u2 & 0x3f);
       }

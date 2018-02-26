@@ -116,9 +116,11 @@ class ModuleGenerator {
         "  const fakeTarget = isCallable ? (function(){}) : {};" +
         "  const reflectingHandler = new Proxy({}, {" +
         "    get(reflectingTarget_, prop, reflectingHandler_) {" +
-        "      return function(fakeTarget_, ...args) {" +
+        "      return function(fakeTarget_, ...otherArgs) {" +
         "        const realTarget = binder();" +
-        "        return Reflect[prop](realTarget, ...args);" +
+        "        if (prop == 'get' || prop == 'set')" +
+        "          otherArgs[prop == 'get' ? 1 : 2] = realTarget;" +
+        "        return Reflect[prop](realTarget, ...otherArgs);" +
         "      };" +
         "    }" +
         "  });" +
