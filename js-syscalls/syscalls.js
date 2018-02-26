@@ -102,31 +102,68 @@ const sizeofRusage = 2 * sizeofTimeval + 30 * sizeofLong;
 import { memory as linearMem } from "__symbols"; // XXX should be __linear_memory
 
 const Buffer = isNodeJs ? __root.Buffer : class Buffer extends Uint8Array {
-  /*
-  static from(value, offsetOrEncoding, length) {
-    function fromString(value, encoding) {
-      if (typeof encoding !== 'string' || encoding === '')
-        encoding = 'utf8';
-      let len = value.length * 4; // maximum length, for UTF-8
-      const buf = new Buffer(len);
-      len = buf.write(value, 0, buf.length, encoding);
-      return buf.slice(0, len);
+  toString(encoding, offset, end) {
+    if (typeof offset !== 'number')
+      offset = 0;
+    if (typeof end !== 'number')
+      end = this.byteLength;
+    if (typeof encoding !== 'string' || encoding === '')
+      encoding = 'utf8';
+    if (offset < 0 || end < offset || end > this.byteLength)
+      throw new RangeError('Out of bounds write');
+    if (encoding !== 'utf8' && encoding !== 'utf-8')
+      throw new TypeError('Unsupported encoding: ' + encoding);
+
+    const nullPos = this.subarray(0, end).indexOf(0, offset);
+    if (nullPos >= 0)
+      end = nullPos;
+    const codePoints = new Uint32Array(end - offset);
+    let nCodePoints = 0;
+
+    // Can't have multiple out-values in JS, so we decode with a closure, which
+    // should be inlined.
+    let i = offset;
+    function readCodePoint() {
+      let u = this[i++];
+      if (u < 0x80) return u; // ASCII, nothing to do
+      if (u >= 0xf8 || u < 0xc0)
+        return 0xfffd; // replace bad lead byte
+      let trailBytes;
+      if (u >= 0xf0) { trailBytes = 3; u &= 0x7; }
+      else if (u >= 0xe0) { trailBytes = 2; u &= 0xf; }
+      else { trailBytes = 1; u &= 0x1f; }
+      const cpEnd = i + trailBytes;
+      if (cpEnd > end) {
+        i = end;
+        return 0xfffd; // replace truncated sequence
+      }
+      let j = i; i = cpEnd;
+      while (j < cpEnd) {
+        const u2 = this[j++];
+        if (u2 >= 0xc0) return 0xfffd; // replace bad trail byte
+        u = (u << 6) | (u2 & 0x3f);
+      }
+      if (u > 0x10ffff || (u & ~0x7ff) == 0xd800)
+        return 0xfffd; // replace out-of-range / surrogate code points
+      const minimalBytes = (u < 0x80) ? 1 : (u < 0x800) ? 2 : (u < 0x10000) ? 3 : 4;
+      if (trailBytes + 1 != minimalBytes)
+        replace 0xfffd; // replace non-minimally-encoded
+      return u;
     }
-    if (typeof value === 'string')
-      return fromString(value, offsetOrEncoding);
-    throw new TypeError('Unsupported Buffer constructor');
+    while (i < end)
+      codePoints[nCodePoints++] = readCodePoint();
+
+    let rv = '';
+    // Sadly, apply() goes through the JavaScript stack, which limits us to smallish
+    // amounts of text per call, so we use a loop to be safe.
+    const codePointsPerApply = 1024;
+    for (let i = 0; i < nCodePoints; ) {
+      const n = Math.min(nCodePoints - i, codePointsPerApply);
+      rv += String.fromCodePoint.apply(String, codePoints.subarray(i, i + n));
+      i += n;
+    }
+    return rv;
   }
-  slice(start, end) {
-    const length = this.length;
-    if (start === undefined)
-      start = 0;
-    if (end === undefined)
-      end = length;
-    start = Math.max(0, Math.min(start < 0 ? length - start : start, length));
-    end = Math.max(start, Math.min(end < 0 ? length - end : end, length));
-    return new Buffer(this.buffer, this.byteOffset + start, end - start);
-  }
-  */
   write(string, offset, length, encoding) {
     if (typeof offset !== 'number')
       offset = 0;
