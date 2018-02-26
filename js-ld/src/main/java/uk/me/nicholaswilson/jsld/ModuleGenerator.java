@@ -1,5 +1,6 @@
 package uk.me.nicholaswilson.jsld;
 
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -23,10 +24,10 @@ class ModuleGenerator {
   // popular third-party script called "symbols"...  Thus I'm trying to keep to
   // an absolute minimum any pollution of the namespace that modules are nested
   // inside, and use underscores for those symbols to make sure.
-  public static final String ROOT_VAR = "__root";
-  public static final String FETCHER_VAR = "__fetcher";
-  public static final String EXPORTS_VAR = "__exports";
-  public static final String SYMBOLS_VAR = "__symbols";
+  public static final String ROOT_VAR = dontMungeSymbol("__root");
+  public static final String FETCHER_VAR = mungeSymbol("__fetcher");
+  public static final String EXPORTS_VAR = dontMungeSymbol("__exports");
+  public static final String SYMBOLS_VAR = mungeSymbol("__symbols");
 
   private List<Statement> scriptStatements = new ArrayList<>();
   private final List<SymbolsFile> symbolsFiles;
@@ -522,6 +523,28 @@ class ModuleGenerator {
         )
       ));
     }
+  }
+
+
+  /*
+   * Returns the symbol name, with a random suffix added.  This is to make it
+   * impossible for user code to reference the symbol directly - since its name
+   * is random and changes every time.
+   *
+   * We do unavoidable pollute the module's namespace with some variable names,
+   * and doing this ensures that callers won't accidentally call those names.
+   */
+  static public String mungeSymbol(String s) {
+    long budge = new SecureRandom().nextLong() % (1L << 48);
+    return s + '_' + Long.toHexString(budge);
+  }
+
+  /*
+   * Returns the symbol name, unbudged (to show that this is a conscious
+   * decision).  These symbols are part of the API js-ld exposes to its modules.
+   */
+  static public String dontMungeSymbol(String s) {
+    return s;
   }
 
 }

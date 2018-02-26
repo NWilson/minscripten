@@ -11,7 +11,6 @@ import java.util.stream.Collectors;
 class RequirementsTable {
 
   private final Map<String, Requirement> requirements = new LinkedHashMap<>();
-  private final Set<String> variableNames = new HashSet<>();
   private final Pattern ALLOWED_LETTERS = Pattern.compile("[0-9a-zA-Z_$]");
 
   public static final RequirementsTable INSTANCE = new RequirementsTable();
@@ -40,17 +39,11 @@ class RequirementsTable {
 
   private String budgeSpecifier(String specifier) {
     StringBuilder sb = new StringBuilder();
+    sb.append("__");
     specifier.codePoints()
       .filter(c -> c == '$' || c == '_' || Character.isLetterOrDigit(c))
       .forEachOrdered(sb::appendCodePoint);
-    String base = "__" + sb.toString();
-    if (!base.isEmpty() && variableNames.add(base))
-      return base;
-    for (int i = 1; ; ++i) {
-      String budged = base + i;
-      if (variableNames.add(budged))
-        return budged;
-    }
+    return ModuleGenerator.mungeSymbol(sb.toString());
   }
 
 
